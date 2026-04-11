@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/lowfat_logo_v2.svg" alt="lowfat" width="200">
+  <img src="docs/lowfat_logo_v2.svg" alt="lowfat" width="500">
 </p>
 
 <p align="center">
