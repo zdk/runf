@@ -223,13 +223,13 @@ For command-specific filtering beyond built-in processors, plugins are shell scr
 Bundled plugins: `git-compact`, `docker-compact`, `ls-compact`, `npm-compact`, `go-compact`, `cargo-compact`
 
 ```sh
-lowfat plugin list          # list installed plugins
-lowfat plugin new cargo     # scaffold a new plugin
-lowfat plugin bench cargo   # benchmark against sample files
-lowfat plugin doctor        # check plugin health
+lowfat plugin list              # list installed plugins
+lowfat plugin new terraform     # scaffold a new plugin
+lowfat plugin bench terraform   # benchmark against sample files
+lowfat plugin doctor            # check plugin health
 ```
 
-`lowfat plugin new cargo` creates `~/.lowfat/plugins/cargo/cargo-compact/` with:
+`lowfat plugin new terraform` creates `~/.lowfat/plugins/terraform/terraform-compact/` with:
 
 ```
 lowfat.toml     # manifest: name, commands, runtime
