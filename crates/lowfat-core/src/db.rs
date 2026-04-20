@@ -54,6 +54,20 @@ pub struct InvocationExport {
 /// Max rows retained in the `invocations` table. Oldest are evicted on insert.
 const INVOCATIONS_CAP: i64 = 10_000;
 
+/// Selective prune strategy for the `invocations` table.
+#[derive(Debug, Clone)]
+pub enum PruneFilter {
+    /// Remove rows whose timestamp is older than N days.
+    OlderThan(u32),
+    /// Remove entire (command, subcommand) groups with fewer than N runs.
+    BelowUsage(u64),
+    /// Remove groups where every row already had a plugin — already filtered,
+    /// so they aren't plugin candidates anymore.
+    KeptByPlugin,
+    /// Wipe the invocations table entirely.
+    All,
+}
+
 /// Summary row from gain report.
 #[derive(Debug)]
 pub struct GainSummary {
@@ -182,6 +196,81 @@ impl Db {
             [INVOCATIONS_CAP],
         )?;
         Ok(())
+    }
+
+    /// Prune invocation rows matching `filter`. With `dry_run=true`, returns the
+    /// count that would be removed without touching the table. Gain stats in the
+    /// `commands` table are lifetime counters and are never pruned here.
+    pub fn prune_invocations(&self, filter: &PruneFilter, dry_run: bool) -> Result<u64> {
+        match filter {
+            PruneFilter::All => {
+                if dry_run {
+                    let n: i64 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM invocations",
+                        [],
+                        |r| r.get(0),
+                    )?;
+                    Ok(n as u64)
+                } else {
+                    let n = self.conn.execute("DELETE FROM invocations", [])?;
+                    Ok(n as u64)
+                }
+            }
+            PruneFilter::OlderThan(days) => {
+                let modifier = format!("-{days} days");
+                if dry_run {
+                    let n: i64 = self.conn.query_row(
+                        "SELECT COUNT(*) FROM invocations WHERE timestamp < datetime('now', ?1)",
+                        [&modifier],
+                        |r| r.get(0),
+                    )?;
+                    Ok(n as u64)
+                } else {
+                    let n = self.conn.execute(
+                        "DELETE FROM invocations WHERE timestamp < datetime('now', ?1)",
+                        [&modifier],
+                    )?;
+                    Ok(n as u64)
+                }
+            }
+            PruneFilter::BelowUsage(min) => {
+                // Tuple-IN subquery: drop every row belonging to groups under the threshold.
+                let count_sql = "SELECT COUNT(*) FROM invocations \
+                    WHERE (command, subcommand) IN ( \
+                        SELECT command, subcommand FROM invocations \
+                        GROUP BY command, subcommand HAVING COUNT(*) < ?1)";
+                let del_sql = "DELETE FROM invocations \
+                    WHERE (command, subcommand) IN ( \
+                        SELECT command, subcommand FROM invocations \
+                        GROUP BY command, subcommand HAVING COUNT(*) < ?1)";
+                let threshold = *min as i64;
+                if dry_run {
+                    let n: i64 = self.conn.query_row(count_sql, [threshold], |r| r.get(0))?;
+                    Ok(n as u64)
+                } else {
+                    let n = self.conn.execute(del_sql, [threshold])?;
+                    Ok(n as u64)
+                }
+            }
+            PruneFilter::KeptByPlugin => {
+                // MIN(had_plugin)=1 → every row in the group already had a plugin.
+                let count_sql = "SELECT COUNT(*) FROM invocations \
+                    WHERE (command, subcommand) IN ( \
+                        SELECT command, subcommand FROM invocations \
+                        GROUP BY command, subcommand HAVING MIN(had_plugin) = 1)";
+                let del_sql = "DELETE FROM invocations \
+                    WHERE (command, subcommand) IN ( \
+                        SELECT command, subcommand FROM invocations \
+                        GROUP BY command, subcommand HAVING MIN(had_plugin) = 1)";
+                if dry_run {
+                    let n: i64 = self.conn.query_row(count_sql, [], |r| r.get(0))?;
+                    Ok(n as u64)
+                } else {
+                    let n = self.conn.execute(del_sql, [])?;
+                    Ok(n as u64)
+                }
+            }
+        }
     }
 
     /// Export all invocation rows (oldest first) for user-driven backup.
@@ -429,6 +518,172 @@ mod tests {
         assert_eq!(ranking[0].command, "cargo");
         assert_eq!(ranking[0].subcommand, "build");
         assert_eq!(ranking[1].command, "git");
+    }
+
+    fn insert_dated_invocation(db: &Db, cmd: &str, sub: &str, had_plugin: bool, ts: &str) {
+        db.conn.execute(
+            "INSERT INTO invocations(timestamp, command, subcommand, raw_tokens, filtered_tokens, had_plugin, exit_code)
+             VALUES(?1, ?2, ?3, 100, 50, ?4, 0)",
+            rusqlite::params![ts, cmd, sub, had_plugin as i64],
+        ).unwrap();
+    }
+
+    fn count_invocations(db: &Db) -> i64 {
+        db.conn
+            .query_row("SELECT COUNT(*) FROM invocations", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn prune_all_wipes_invocations_but_leaves_gain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(tmp.path()).unwrap();
+
+        for i in 0..3 {
+            db.record_invocation(&InvocationRecord {
+                command: "git".into(),
+                subcommand: format!("s{i}"),
+                raw_tokens: 100,
+                filtered_tokens: 20,
+                had_plugin: true,
+                exit_code: 0,
+            })
+            .unwrap();
+        }
+        db.track(&TrackRecord {
+            original_cmd: "git status".into(),
+            lowfat_cmd: "lowfat git status".into(),
+            raw: "a".repeat(100),
+            filtered: "a".repeat(20),
+            exec_time_ms: 5,
+            project_path: "/tmp".into(),
+        })
+        .unwrap();
+
+        let removed = db.prune_invocations(&PruneFilter::All, false).unwrap();
+        assert_eq!(removed, 3);
+        assert_eq!(count_invocations(&db), 0);
+        // Gain totals (commands table) must be untouched.
+        assert_eq!(db.gain_summary().unwrap().commands, 1);
+    }
+
+    #[test]
+    fn prune_older_than_keeps_recent_drops_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(tmp.path()).unwrap();
+
+        // One old row, one recent row.
+        insert_dated_invocation(&db, "git", "log", false, "2020-01-01 00:00:00");
+        insert_dated_invocation(&db, "git", "status", false, "2099-01-01 00:00:00");
+
+        let removed = db
+            .prune_invocations(&PruneFilter::OlderThan(30), false)
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(count_invocations(&db), 1);
+    }
+
+    #[test]
+    fn prune_below_usage_drops_rare_groups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(tmp.path()).unwrap();
+
+        // git status: 3 runs (keep); kubectl get: 1 run (drop at --below 2).
+        for _ in 0..3 {
+            db.record_invocation(&InvocationRecord {
+                command: "git".into(),
+                subcommand: "status".into(),
+                raw_tokens: 50,
+                filtered_tokens: 10,
+                had_plugin: false,
+                exit_code: 0,
+            })
+            .unwrap();
+        }
+        db.record_invocation(&InvocationRecord {
+            command: "kubectl".into(),
+            subcommand: "get".into(),
+            raw_tokens: 4000,
+            filtered_tokens: 4000,
+            had_plugin: false,
+            exit_code: 0,
+        })
+        .unwrap();
+
+        let preview = db
+            .prune_invocations(&PruneFilter::BelowUsage(2), true)
+            .unwrap();
+        assert_eq!(preview, 1);
+        assert_eq!(count_invocations(&db), 4); // dry-run didn't delete
+
+        let removed = db
+            .prune_invocations(&PruneFilter::BelowUsage(2), false)
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(count_invocations(&db), 3);
+    }
+
+    #[test]
+    fn prune_kept_by_plugin_drops_fully_covered_groups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(tmp.path()).unwrap();
+
+        // git status: all runs had a plugin → drop.
+        for _ in 0..3 {
+            db.record_invocation(&InvocationRecord {
+                command: "git".into(),
+                subcommand: "status".into(),
+                raw_tokens: 50,
+                filtered_tokens: 10,
+                had_plugin: true,
+                exit_code: 0,
+            })
+            .unwrap();
+        }
+        // kubectl get: no plugin coverage → keep.
+        for _ in 0..2 {
+            db.record_invocation(&InvocationRecord {
+                command: "kubectl".into(),
+                subcommand: "get".into(),
+                raw_tokens: 4000,
+                filtered_tokens: 4000,
+                had_plugin: false,
+                exit_code: 0,
+            })
+            .unwrap();
+        }
+
+        let removed = db
+            .prune_invocations(&PruneFilter::KeptByPlugin, false)
+            .unwrap();
+        assert_eq!(removed, 3);
+        assert_eq!(count_invocations(&db), 2);
+    }
+
+    #[test]
+    fn prune_dry_run_never_mutates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(tmp.path()).unwrap();
+        for _ in 0..5 {
+            db.record_invocation(&InvocationRecord {
+                command: "git".into(),
+                subcommand: "log".into(),
+                raw_tokens: 100,
+                filtered_tokens: 50,
+                had_plugin: false,
+                exit_code: 0,
+            })
+            .unwrap();
+        }
+        for filter in [
+            PruneFilter::All,
+            PruneFilter::BelowUsage(100),
+            PruneFilter::KeptByPlugin,
+            PruneFilter::OlderThan(0),
+        ] {
+            db.prune_invocations(&filter, true).unwrap();
+            assert_eq!(count_invocations(&db), 5, "dry-run mutated with {filter:?}");
+        }
     }
 
     #[test]

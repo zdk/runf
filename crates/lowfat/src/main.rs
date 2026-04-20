@@ -75,6 +75,33 @@ enum HistoryAction {
     },
     /// Export all invocation rows as JSON to stdout (for backup / analysis)
     Export,
+    /// Selectively delete invocation rows (does not touch lifetime gain totals)
+    #[command(after_help = "\
+Examples:
+  lowfat history prune                     # default: --older-than 90d
+  lowfat history prune --older-than 30d    # 30d, 2w, 3m suffixes accepted
+  lowfat history prune --below 2           # drop groups with fewer than 2 runs
+  lowfat history prune --kept-by-plugin    # drop groups already covered by a plugin
+  lowfat history prune --all               # wipe all invocation rows
+  lowfat history prune --dry-run [...]     # preview without deleting")]
+    Prune {
+        /// Drop rows older than this duration (e.g. 30d, 2w, 3m). Default if no
+        /// other criterion is given: 90d.
+        #[arg(long, value_name = "DURATION")]
+        older_than: Option<String>,
+        /// Drop (command, subcommand) groups with fewer than N runs
+        #[arg(long, value_name = "N")]
+        below: Option<u64>,
+        /// Drop groups where every run was already handled by a plugin
+        #[arg(long)]
+        kept_by_plugin: bool,
+        /// Wipe all invocation rows
+        #[arg(long)]
+        all: bool,
+        /// Report what would be removed without deleting
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -121,6 +148,19 @@ fn main() {
         Some(Commands::History { action }) => match action {
             Some(HistoryAction::Candidates { limit }) => commands::candidates::run(limit),
             Some(HistoryAction::Export) => commands::history_export::run(),
+            Some(HistoryAction::Prune {
+                older_than,
+                below,
+                kept_by_plugin,
+                all,
+                dry_run,
+            }) => commands::history_prune::run(commands::history_prune::PruneOpts {
+                older_than,
+                below,
+                kept_by_plugin,
+                all,
+                dry_run,
+            }),
             None => commands::candidates::run(20),
         },
         Some(Commands::ShellInit { shell }) => commands::shell_init::run(&shell),

@@ -166,6 +166,17 @@ Env vars take priority over `.lowfat` file. History and gain data live at `$LOWF
 
 `no`-plugin rows are the best candidates. Only `command` + first non-flag arg is stored locally (capped at 10k rows) — never full arguments, output, or secrets.
 
+Prune selectively when the table gets noisy (lifetime `gain` totals are kept intact):
+
+```sh
+lowfat history prune                    # default: --older-than 90d
+lowfat history prune --older-than 30d   # 30d, 2w, 3m accepted
+lowfat history prune --below 2          # drop one-off commands
+lowfat history prune --kept-by-plugin   # drop groups already handled by a plugin
+lowfat history prune --all              # wipe all invocation rows
+lowfat history prune --dry-run [...]    # preview without deleting
+```
+
 ### Filtering any command
 
 Add a one-liner to `.lowfat` — no plugin needed:
