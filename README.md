@@ -279,4 +279,4 @@ Apache-2.0
 
 ## AI notice
 
-AI tools were used for this project
+Multiple AI tools were used for this project

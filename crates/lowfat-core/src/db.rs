@@ -23,7 +23,13 @@ pub struct InvocationRecord {
     pub subcommand: String,
     pub raw_tokens: u64,
     pub filtered_tokens: u64,
+    /// A plugin is registered for this command (regardless of subcommand scope).
     pub had_plugin: bool,
+    /// Plugin applies to *this* subcommand — i.e. matches its declared list,
+    /// or plugin declares no subcommand restriction.
+    pub in_scope: bool,
+    /// Filter actually shrank output (filtered_tokens < raw_tokens).
+    pub reduced: bool,
     pub exit_code: i32,
 }
 
@@ -34,9 +40,14 @@ pub struct HistoryRow {
     pub subcommand: String,
     pub runs: u64,
     pub avg_raw_tokens: f64,
+    pub total_raw_tokens: u64,
     pub savings_pct: f64,
-    pub avg_saved_tokens: f64,
-    pub plugin_ratio: f64,
+    /// AVG(had_plugin): plugin registered for this command.
+    pub registered_ratio: f64,
+    /// AVG(in_scope): filter declared to cover this subcommand.
+    pub in_scope_ratio: f64,
+    /// AVG(reduced): filter actually shrank output on average.
+    pub reduced_ratio: f64,
     pub score: f64,
 }
 
@@ -49,6 +60,8 @@ pub struct InvocationExport {
     pub raw_tokens: u64,
     pub filtered_tokens: u64,
     pub had_plugin: bool,
+    pub in_scope: bool,
+    pub reduced: bool,
     pub exit_code: i32,
 }
 
@@ -145,6 +158,29 @@ impl Db {
             );
             CREATE INDEX IF NOT EXISTS idx_invocations_cmd ON invocations(command, subcommand);",
         )?;
+
+        // Finer-grained status columns. Added after initial schema so existing
+        // databases get migrated in place. `in_scope` distinguishes "plugin
+        // declares this subcommand" from bare "plugin registered"; `reduced`
+        // captures whether the filter actually shrank the output. Together
+        // they split the misleading "has_plugin=yes, savings=0%" rows into
+        // out-of-scope / noop / weak / good.
+        let _ = conn.execute("ALTER TABLE invocations ADD COLUMN in_scope INTEGER", []);
+        let _ = conn.execute("ALTER TABLE invocations ADD COLUMN reduced INTEGER", []);
+        // Backfill legacy rows once. `reduced` is perfectly derivable from
+        // stored token counts. `in_scope` can only be approximated — use
+        // `had_plugin` as best-effort proxy (overestimates for subcommands
+        // the plugin never covered, but only for rows predating migration).
+        conn.execute(
+            "UPDATE invocations SET reduced = CASE \
+                WHEN filtered_tokens < raw_tokens THEN 1 ELSE 0 END \
+             WHERE reduced IS NULL",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE invocations SET in_scope = had_plugin WHERE in_scope IS NULL",
+            [],
+        )?;
         Ok(Db { conn })
     }
 
@@ -180,14 +216,16 @@ impl Db {
     /// once the table grows past `INVOCATIONS_CAP`.
     pub fn record_invocation(&self, rec: &InvocationRecord) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO invocations(timestamp, command, subcommand, raw_tokens, filtered_tokens, had_plugin, exit_code)
-             VALUES(datetime('now'), ?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO invocations(timestamp, command, subcommand, raw_tokens, filtered_tokens, had_plugin, in_scope, reduced, exit_code)
+             VALUES(datetime('now'), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 rec.command,
                 rec.subcommand,
                 rec.raw_tokens as i64,
                 rec.filtered_tokens as i64,
                 rec.had_plugin as i64,
+                rec.in_scope as i64,
+                rec.reduced as i64,
                 rec.exit_code,
             ],
         )?;
@@ -275,10 +313,10 @@ impl Db {
     }
 
     /// Export all invocation rows (oldest first) for user-driven backup.
-    /// Returns `(timestamp, command, subcommand, raw_tokens, filtered_tokens, had_plugin, exit_code)`.
     pub fn export_invocations(&self) -> Result<Vec<InvocationExport>> {
         let mut stmt = self.conn.prepare(
-            "SELECT timestamp, command, subcommand, raw_tokens, filtered_tokens, had_plugin, exit_code
+            "SELECT timestamp, command, subcommand, raw_tokens, filtered_tokens,
+                    had_plugin, COALESCE(in_scope,0), COALESCE(reduced,0), exit_code
              FROM invocations ORDER BY id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -289,45 +327,61 @@ impl Db {
                 raw_tokens: row.get::<_, i64>(3)? as u64,
                 filtered_tokens: row.get::<_, i64>(4)? as u64,
                 had_plugin: row.get::<_, i64>(5)? != 0,
-                exit_code: row.get(6)?,
+                in_scope: row.get::<_, i64>(6)? != 0,
+                reduced: row.get::<_, i64>(7)? != 0,
+                exit_code: row.get(8)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Rank command+subcommand pairs as plugin candidates.
-    /// Score = runs × avg_raw_tokens × (1 − savings_ratio) — i.e. called often,
-    /// produces a lot, and lowfat is not yet shrinking it much.
-    pub fn history_ranking(&self, limit: usize) -> Result<Vec<HistoryRow>> {
-        let mut stmt = self.conn.prepare(
+    ///
+    /// Score = SUM(filtered_tokens) — bytes still flowing through to the LLM
+    /// after filtering. High score = "lowfat hasn't tamed this row yet,"
+    /// regardless of whether that's because there's no plugin or because the
+    /// filter is weak. Note: the previous formula was effectively SUM(saved),
+    /// which inverted the intent and put well-filtered rows at the top.
+    ///
+    /// `show_all=false` hides trivia (avg raw < 50 tokens or fewer than 2 runs)
+    /// where no amount of plugin work could plausibly help.
+    pub fn history_ranking(&self, limit: usize, show_all: bool) -> Result<Vec<HistoryRow>> {
+        let extra_having = if show_all {
+            ""
+        } else {
+            " AND AVG(raw_tokens) >= 50 AND COUNT(*) >= 2"
+        };
+        let sql = format!(
             "SELECT command, subcommand,
                     COUNT(*) AS runs,
                     AVG(raw_tokens) AS avg_raw,
+                    SUM(raw_tokens) AS total_raw,
                     CASE WHEN SUM(raw_tokens) > 0
                          THEN 100.0 * (1.0 - 1.0 * SUM(filtered_tokens) / SUM(raw_tokens))
                          ELSE 0 END AS savings_pct,
-                    AVG(raw_tokens - filtered_tokens) AS avg_saved,
-                    AVG(had_plugin) AS plugin_ratio,
-                    COUNT(*) * AVG(raw_tokens) *
-                        (CASE WHEN SUM(raw_tokens) > 0
-                              THEN 1.0 - 1.0 * SUM(filtered_tokens) / SUM(raw_tokens)
-                              ELSE 0 END) AS score
+                    AVG(had_plugin) AS registered_ratio,
+                    AVG(COALESCE(in_scope,0)) AS in_scope_ratio,
+                    AVG(COALESCE(reduced,0)) AS reduced_ratio,
+                    SUM(filtered_tokens) AS score
              FROM invocations
              GROUP BY command, subcommand
-             HAVING SUM(raw_tokens) > 0
+             HAVING SUM(raw_tokens) > 0{extra_having}
              ORDER BY score DESC
-             LIMIT ?1",
-        )?;
+             LIMIT ?1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([limit as i64], |row| {
             Ok(HistoryRow {
                 command: row.get(0)?,
                 subcommand: row.get(1)?,
                 runs: row.get::<_, i64>(2)? as u64,
                 avg_raw_tokens: row.get(3)?,
-                savings_pct: row.get(4)?,
-                avg_saved_tokens: row.get::<_, f64>(5)?.max(0.0),
-                plugin_ratio: row.get(6)?,
-                score: row.get(7)?,
+                total_raw_tokens: row.get::<_, i64>(4)? as u64,
+                savings_pct: row.get(5)?,
+                registered_ratio: row.get(6)?,
+                in_scope_ratio: row.get(7)?,
+                reduced_ratio: row.get(8)?,
+                score: row.get(9)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -486,6 +540,8 @@ mod tests {
                 raw_tokens: 100,
                 filtered_tokens: 20,
                 had_plugin: true,
+                in_scope: true,
+                reduced: true,
                 exit_code: 0,
             }).unwrap();
         }
@@ -505,7 +561,8 @@ mod tests {
             db.record_invocation(&InvocationRecord {
                 command: "cargo".into(), subcommand: "build".into(),
                 raw_tokens: 2000, filtered_tokens: 1900,
-                had_plugin: false, exit_code: 0,
+                had_plugin: false, in_scope: false, reduced: true,
+                exit_code: 0,
             }).unwrap();
         }
         // "git status": 10 × 30 × 0.9 savings = score 270 (small and well-filtered)
@@ -513,21 +570,28 @@ mod tests {
             db.record_invocation(&InvocationRecord {
                 command: "git".into(), subcommand: "status".into(),
                 raw_tokens: 30, filtered_tokens: 3,
-                had_plugin: true, exit_code: 0,
+                had_plugin: true, in_scope: true, reduced: true,
+                exit_code: 0,
             }).unwrap();
         }
 
-        let ranking = db.history_ranking(10).unwrap();
+        // show_all=true: keep tiny git-status group so we can still assert both rows.
+        let ranking = db.history_ranking(10, true).unwrap();
         assert_eq!(ranking.len(), 2);
         assert_eq!(ranking[0].command, "cargo");
         assert_eq!(ranking[0].subcommand, "build");
         assert_eq!(ranking[1].command, "git");
+
+        // Default view (show_all=false) filters out avg_raw < 50 → git-status drops.
+        let trimmed = db.history_ranking(10, false).unwrap();
+        assert_eq!(trimmed.len(), 1);
+        assert_eq!(trimmed[0].command, "cargo");
     }
 
     fn insert_dated_invocation(db: &Db, cmd: &str, sub: &str, had_plugin: bool, ts: &str) {
         db.conn.execute(
-            "INSERT INTO invocations(timestamp, command, subcommand, raw_tokens, filtered_tokens, had_plugin, exit_code)
-             VALUES(?1, ?2, ?3, 100, 50, ?4, 0)",
+            "INSERT INTO invocations(timestamp, command, subcommand, raw_tokens, filtered_tokens, had_plugin, in_scope, reduced, exit_code)
+             VALUES(?1, ?2, ?3, 100, 50, ?4, ?4, 1, 0)",
             rusqlite::params![ts, cmd, sub, had_plugin as i64],
         ).unwrap();
     }
@@ -550,6 +614,8 @@ mod tests {
                 raw_tokens: 100,
                 filtered_tokens: 20,
                 had_plugin: true,
+                in_scope: true,
+                reduced: true,
                 exit_code: 0,
             })
             .unwrap();
@@ -600,6 +666,8 @@ mod tests {
                 raw_tokens: 50,
                 filtered_tokens: 10,
                 had_plugin: false,
+                in_scope: false,
+                reduced: true,
                 exit_code: 0,
             })
             .unwrap();
@@ -610,6 +678,8 @@ mod tests {
             raw_tokens: 4000,
             filtered_tokens: 4000,
             had_plugin: false,
+            in_scope: false,
+            reduced: false,
             exit_code: 0,
         })
         .unwrap();
@@ -640,6 +710,8 @@ mod tests {
                 raw_tokens: 50,
                 filtered_tokens: 10,
                 had_plugin: true,
+                in_scope: true,
+                reduced: true,
                 exit_code: 0,
             })
             .unwrap();
@@ -652,6 +724,8 @@ mod tests {
                 raw_tokens: 4000,
                 filtered_tokens: 4000,
                 had_plugin: false,
+                in_scope: false,
+                reduced: false,
                 exit_code: 0,
             })
             .unwrap();
@@ -675,6 +749,8 @@ mod tests {
                 raw_tokens: 100,
                 filtered_tokens: 50,
                 had_plugin: false,
+                in_scope: false,
+                reduced: true,
                 exit_code: 0,
             })
             .unwrap();

@@ -89,12 +89,20 @@ pub fn run(args: &[String]) -> i32 {
         });
         // Usage history — command+subcommand only, no args. Powers `lowfat history`.
         let known = known_subcommands(cmd, &plugin_map, &external_plugins, &external_map);
+        // in_scope = plugin is declared to handle *this* subcommand. Empty
+        // `known` means "no subcommand restriction" — treat as universal.
+        let in_scope = filter_name.is_some()
+            && (known.is_empty() || known.iter().any(|s| s == &subcommand));
+        let raw_tokens = lowfat_core::tokens::estimate_tokens(&raw) as u64;
+        let filtered_tokens = lowfat_core::tokens::estimate_tokens(&filtered) as u64;
         let _ = db.record_invocation(&InvocationRecord {
             command: cmd.clone(),
             subcommand: history_subcommand(&subcommand, &known),
-            raw_tokens: lowfat_core::tokens::estimate_tokens(&raw) as u64,
-            filtered_tokens: lowfat_core::tokens::estimate_tokens(&filtered) as u64,
+            raw_tokens,
+            filtered_tokens,
             had_plugin: filter_name.is_some(),
+            in_scope,
+            reduced: filtered_tokens < raw_tokens,
             exit_code,
         });
     }
@@ -277,6 +285,8 @@ fn passthrough(cmd: &str, args: &[String], config: &RunfConfig) -> i32 {
             raw_tokens: tokens,
             filtered_tokens: tokens,
             had_plugin: false,
+            in_scope: false,
+            reduced: false,
             exit_code,
         });
     }

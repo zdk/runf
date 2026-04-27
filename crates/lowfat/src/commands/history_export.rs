@@ -20,6 +20,8 @@ pub fn run() -> Result<()> {
                 "raw_tokens": r.raw_tokens,
                 "filtered_tokens": r.filtered_tokens,
                 "had_plugin": r.had_plugin,
+                "in_scope": r.in_scope,
+                "reduced": r.reduced,
                 "exit_code": r.exit_code,
             })
         })

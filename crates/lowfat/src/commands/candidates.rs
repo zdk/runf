@@ -1,6 +1,6 @@
 use anyhow::Result;
 use lowfat_core::config::RunfConfig;
-use lowfat_core::db::Db;
+use lowfat_core::db::{Db, HistoryRow};
 
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
@@ -10,24 +10,90 @@ const YELLOW: &str = "\x1b[33m";
 const MAGENTA: &str = "\x1b[35m";
 const WHITE: &str = "\x1b[97m";
 
+/// Per-row diagnosis — what the user should *do* about this command.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Status {
+    /// No plugin registered for this command → write one.
+    NoPlugin,
+    /// Plugin exists but doesn't declare this subcommand → extend it.
+    OutOfScope,
+    /// Filter applies but barely trims on non-trivial output → tune it.
+    Weak,
+    /// Filter is doing its job.
+    Good,
+}
+
+impl Status {
+    fn label(self) -> &'static str {
+        match self {
+            Status::NoPlugin => "no-plugin",
+            Status::OutOfScope => "out-of-scope",
+            Status::Weak => "weak",
+            Status::Good => "good",
+        }
+    }
+
+    /// Magenta = action item, dim = already handled.
+    fn color(self) -> &'static str {
+        match self {
+            Status::NoPlugin | Status::OutOfScope | Status::Weak => MAGENTA,
+            Status::Good => DIM,
+        }
+    }
+}
+
+/// Classify a row from the three signal ratios. Order matters: each branch
+/// assumes the prior ones didn't match, so the decision tree reads:
+///   no plugin? → out-of-scope? → weak? → good.
+fn classify(r: &HistoryRow) -> Status {
+    if r.registered_ratio < 0.5 {
+        Status::NoPlugin
+    } else if r.in_scope_ratio < 0.5 {
+        Status::OutOfScope
+    } else if r.savings_pct < 20.0 {
+        // In scope but savings are poor — filter needs work (or raw was tiny,
+        // but the default trivia filter already excludes those).
+        Status::Weak
+    } else {
+        Status::Good
+    }
+}
+
 fn fmt_tokens(n: f64) -> String {
     if n >= 1_000_000.0 {
         format!("{:.1}M", n / 1_000_000.0)
     } else if n >= 1_000.0 {
         format!("{:.1}K", n / 1_000.0)
     } else {
-        // One decimal so avg raw / avg saved reconcile with the % column
-        // (e.g. 77.3 × 73.7% ≈ 57.0, which reads clean).
-        format!("{n:.1}")
+        format!("{n:.0}")
     }
 }
 
-/// Plugin-candidate ranking. High score = called often, big output,
-/// and lowfat isn't trimming it much yet.
-pub fn run(limit: usize) -> Result<()> {
+fn fmt_total(n: u64) -> String {
+    fmt_tokens(n as f64)
+}
+
+/// Ten-cell bar rendered with `█ ▒ ░` for 0/half/full shading. Score is
+/// normalised against the max in the current result set, so the top row
+/// always shows a full bar — the bar conveys relative pecking order, not
+/// absolute token counts (that's what `cost` is for).
+fn opportunity_bar(score: f64, max_score: f64) -> String {
+    if max_score <= 0.0 {
+        return "░".repeat(10);
+    }
+    let filled = ((score / max_score) * 10.0).round() as usize;
+    let filled = filled.min(10);
+    let mut bar = String::with_capacity(10);
+    for i in 0..10 {
+        bar.push(if i < filled { '█' } else { '░' });
+    }
+    bar
+}
+
+pub fn run(limit: usize, show_all: bool) -> Result<()> {
     let config = RunfConfig::resolve();
     let db = Db::open(&config.data_dir)?;
-    let rows = db.history_ranking(limit)?;
+    let rows = db.history_ranking(limit, show_all)?;
 
     println!();
     println!("  {BOLD}{WHITE}lowfat{RESET} {DIM}plugin candidates{RESET}");
@@ -35,14 +101,24 @@ pub fn run(limit: usize) -> Result<()> {
     println!();
 
     if rows.is_empty() {
-        println!("  {DIM}No data yet. Run some commands through lowfat!{RESET}");
+        if show_all {
+            println!("  {DIM}No data yet. Run some commands through lowfat!{RESET}");
+        } else {
+            println!(
+                "  {DIM}No actionable rows. Re-run with {BOLD}--all{RESET}{DIM} to see every command.{RESET}"
+            );
+        }
         println!();
         return Ok(());
     }
 
+    let max_score = rows.iter().map(|r| r.score).fold(0.0_f64, f64::max);
+
+    // Header: cost is total raw tokens consumed; opportunity is the score
+    // normalised against max_score (see opportunity_bar).
     println!(
-        "  {DIM}{:>3}  {:<25} {:>5}  {:>9}  {:>9}  {:>8}  {:>10}{RESET}",
-        "#", "command", "runs", "avg raw", "avg saved", "savings", "has_plugin"
+        "  {DIM}{:>3}  {:<25} {:>5}  {:>8}  {:>8}  {:>8}  {:<13}  {:<14}{RESET}",
+        "#", "command", "runs", "avg raw", "cost", "savings", "status", "opportunity"
     );
 
     for (i, r) in rows.iter().enumerate() {
@@ -52,50 +128,137 @@ pub fn run(limit: usize) -> Result<()> {
         } else {
             format!("{} {}", r.command, r.subcommand)
         };
-        // Under-performing filter: has a plugin but isn't saving much,
-        // on output big enough that it should be. Same magenta as
-        // "no plugin" — both signal "act on this row".
-        let underperforming =
-            r.plugin_ratio >= 0.5 && r.savings_pct < 20.0 && r.avg_raw_tokens > 50.0;
+        let status = classify(r);
+        let status_cell = format!(
+            "{}{:<13}{RESET}",
+            status.color(),
+            status.label()
+        );
+        // Savings pct colour: dim when done, yellow when mid, magenta for weak.
         let save_color = if r.savings_pct >= 50.0 {
             DIM
-        } else if r.plugin_ratio < 0.5 || underperforming {
-            MAGENTA
-        } else {
+        } else if r.savings_pct >= 20.0 {
             YELLOW
-        };
-        let (plugin_text, plugin_color) = if r.plugin_ratio >= 0.99 {
-            ("yes".to_string(), DIM)
-        } else if r.plugin_ratio <= 0.01 {
-            ("no".to_string(), MAGENTA)
         } else {
-            (format!("{:.0}%", r.plugin_ratio * 100.0), YELLOW)
+            MAGENTA
         };
-        // Pad the visible text first so color codes don't break alignment.
-        let plugin_mark = format!("{plugin_color}{plugin_text:>10}{RESET}");
+        let bar = opportunity_bar(r.score, max_score);
         println!(
-            "  {BOLD}{:>3}{RESET}  {CYAN}{:<25}{RESET} {:>4}x  {:>9}  {:>9}  {save_color}{:>7.1}%{RESET}  {}",
+            "  {BOLD}{:>3}{RESET}  {CYAN}{:<25}{RESET} {:>4}x  {:>8}  {:>8}  {save_color}{:>7.1}%{RESET}  {}  {}",
             rank,
             label,
             r.runs,
             fmt_tokens(r.avg_raw_tokens),
-            fmt_tokens(r.avg_saved_tokens),
+            fmt_total(r.total_raw_tokens),
             r.savings_pct,
-            plugin_mark,
+            status_cell,
+            bar,
         );
     }
 
+    // Footer totals: sum across the shown rows only, so "total" matches the
+    // table. Hidden rows (trivia) don't contribute — that's intentional.
+    let total_raw: u64 = rows.iter().map(|r| r.total_raw_tokens).sum();
+    let total_saved: u64 = rows
+        .iter()
+        .map(|r| (r.total_raw_tokens as f64 * r.savings_pct / 100.0).round() as u64)
+        .sum();
+    let total_pct = if total_raw > 0 {
+        100.0 * total_saved as f64 / total_raw as f64
+    } else {
+        0.0
+    };
+
     println!();
     println!(
-        "  {DIM}Tip: rows marked {MAGENTA}\"no\"{RESET}{DIM} have no filter yet — good plugin candidates.{RESET}"
+        "  {DIM}total: {} raw → {} saved ({:.1}%){RESET}",
+        fmt_total(total_raw),
+        fmt_total(total_saved),
+        total_pct
+    );
+    if !show_all {
+        println!(
+            "  {DIM}(rows with avg raw <50 tok or <2 runs hidden — pass {BOLD}--all{RESET}{DIM} to see them){RESET}"
+        );
+    }
+    println!();
+    println!(
+        "  {DIM}Action key:{RESET} {MAGENTA}no-plugin{RESET}{DIM} → scaffold ({BOLD}lowfat plugin new <cmd>{RESET}{DIM}){RESET}"
     );
     println!(
-        "       {DIM}Scaffold one with:{RESET} {BOLD}lowfat plugin new <command>{RESET}"
+        "              {MAGENTA}out-of-scope{RESET}{DIM} → extend plugin's declared subcommands{RESET}"
     );
     println!(
-        "       {DIM}rows marked {MAGENTA}\"yes\"{RESET}{DIM} with {MAGENTA}low savings{RESET}{DIM} — the filter may need tuning.{RESET}"
+        "              {MAGENTA}weak{RESET}{DIM} → tune the filter (likely under-matching patterns){RESET}"
     );
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(
+        cmd: &str,
+        runs: u64,
+        avg_raw: f64,
+        savings: f64,
+        reg: f64,
+        scope: f64,
+    ) -> HistoryRow {
+        HistoryRow {
+            command: cmd.into(),
+            subcommand: String::new(),
+            runs,
+            avg_raw_tokens: avg_raw,
+            total_raw_tokens: (avg_raw * runs as f64) as u64,
+            savings_pct: savings,
+            registered_ratio: reg,
+            in_scope_ratio: scope,
+            reduced_ratio: if savings > 0.0 { 1.0 } else { 0.0 },
+            score: avg_raw * runs as f64 * (1.0 - savings / 100.0),
+        }
+    }
+
+    #[test]
+    fn classify_no_plugin_when_unregistered() {
+        assert_eq!(classify(&row("npm", 5, 200.0, 0.0, 0.0, 0.0)), Status::NoPlugin);
+    }
+
+    #[test]
+    fn classify_out_of_scope_when_registered_but_subcommand_unmatched() {
+        // git commit: plugin exists (registered) but git-compact doesn't declare `commit`.
+        assert_eq!(
+            classify(&row("git", 5, 200.0, 0.0, 1.0, 0.0)),
+            Status::OutOfScope
+        );
+    }
+
+    #[test]
+    fn classify_weak_when_in_scope_but_low_savings() {
+        // git show: in scope, but filter barely trims.
+        assert_eq!(
+            classify(&row("git", 15, 493.0, 8.8, 1.0, 1.0)),
+            Status::Weak
+        );
+    }
+
+    #[test]
+    fn classify_good_when_in_scope_and_saving() {
+        assert_eq!(
+            classify(&row("ls", 109, 109.4, 55.1, 1.0, 1.0)),
+            Status::Good
+        );
+    }
+
+    #[test]
+    fn opportunity_bar_scales_to_max() {
+        assert_eq!(opportunity_bar(100.0, 100.0), "██████████");
+        assert_eq!(opportunity_bar(50.0, 100.0), "█████░░░░░");
+        assert_eq!(opportunity_bar(0.0, 100.0), "░░░░░░░░░░");
+        // Guard: no rows at all → all-empty bar, not a panic.
+        assert_eq!(opportunity_bar(5.0, 0.0), "░░░░░░░░░░");
+    }
 }
