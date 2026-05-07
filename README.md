@@ -263,6 +263,42 @@ Plugins can be mixed with built-in processors in pipelines:
 pipeline.git = strip-ansi | git-compact | truncate:100
 ```
 
+#### Building a plugin with an AI agent
+
+Copy-paste this prompt into Claude Code (or another tool-using agent) and replace `<COMMAND>`:
+
+```
+Create a lowfat plugin to filter `<COMMAND>` output for LLM contexts.
+
+Before writing code:
+1. Read docs/PLUGINS.md to learn the manifest schema, env-var contract,
+   and per-level expectations.
+2. Ask me: which subcommands to specialize, and what's noise vs. signal
+   in this command's output.
+
+Scaffold at `~/.lowfat/plugins/<COMMAND>/<COMMAND>-compact/`:
+- `lowfat.toml` — manifest with `commands` (any aliases too) and the
+  agreed `subcommands` list
+- `filter.sh` — POSIX sh, `chmod +x`, reads stdin → writes stdout
+
+Filter contract:
+- `LOWFAT_LEVEL=ultra` → verdict line(s) only
+- `LOWFAT_LEVEL=full`  → strip noise (progress chatter, banner prose),
+                         keep diffs / errors / structure
+- `LOWFAT_LEVEL=lite`  → gentle trim, higher row caps
+- Non-zero `$LOWFAT_EXIT_CODE` → be conservative; preserve error blocks
+- Use `$LOWFAT_SUBCOMMAND`, fall back to walking `$LOWFAT_ARGS` when you
+  need flags or resource type
+
+Verify:
+- `lowfat plugin doctor`            (registers cleanly)
+- Drop real captures in `samples/<command>-<sub>-full.txt`
+- `lowfat plugin bench <name>`      (aim ≥80% at full on noisy commands)
+- Smoke-test: `lowfat <COMMAND> ...` against a real run
+```
+
+The agent will ask you what counts as noise — answer with sample output if you have it, then iterate on the bench numbers.
+
 ## Alternatives
 
 - [rtk](https://github.com/rtk-ai/rtk)
