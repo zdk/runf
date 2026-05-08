@@ -22,6 +22,7 @@ pub fn run() -> Result<()> {
                 "had_plugin": r.had_plugin,
                 "in_scope": r.in_scope,
                 "reduced": r.reduced,
+                "is_external_plugin": r.is_external_plugin,
                 "exit_code": r.exit_code,
             })
         })

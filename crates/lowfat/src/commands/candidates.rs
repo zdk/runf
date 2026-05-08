@@ -11,7 +11,8 @@ const MAGENTA: &str = "\x1b[35m";
 const WHITE: &str = "\x1b[97m";
 
 /// Per-row diagnosis on two independent axes:
-/// `source` — who handled the output (plugin vs lowfat's built-in passthrough);
+/// `source` — where the handler comes from (external plugin vs the binary's
+///            compiled-in filters or no filter at all);
 /// `quality` — how well it filtered (action signal: `weak` rows want tuning).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Status {
@@ -21,11 +22,11 @@ struct Status {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Source {
-    /// A registered plugin claims this command+subcommand.
+    /// External plugin from `~/.lowfat/plugins/` handled this command — i.e.
+    /// something the user installed themselves.
     Plugin,
-    /// No plugin handles this row — output is lowfat's built-in passthrough.
-    /// This includes the "registered but subcommand not declared" case: the
-    /// plugin doesn't actually run for it, so the row is effectively built-in.
+    /// Native built-in filter compiled into the lowfat binary, OR no filter
+    /// at all (passthrough). Either way, not a user-installed plugin.
     BuiltIn,
 }
 
@@ -64,7 +65,10 @@ impl Quality {
 }
 
 fn classify(r: &HistoryRow) -> Status {
-    let source = if r.in_scope_ratio >= 0.5 {
+    // Source reflects ownership, not effectiveness: an external plugin that
+    // happens to passthrough still shows "plugin" so the user knows where to
+    // tune. Effectiveness lives in the `quality` axis below.
+    let source = if r.external_ratio >= 0.5 {
         Source::Plugin
     } else {
         Source::BuiltIn
@@ -217,7 +221,16 @@ pub fn run(limit: usize, show_all: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn row(cmd: &str, runs: u64, avg_raw: f64, savings: f64, scope: f64) -> HistoryRow {
+    /// `external` is the column that now drives Source; `scope` is kept for the
+    /// other ratios so we mirror the SQL aggregation faithfully.
+    fn row(
+        cmd: &str,
+        runs: u64,
+        avg_raw: f64,
+        savings: f64,
+        scope: f64,
+        external: f64,
+    ) -> HistoryRow {
         HistoryRow {
             command: cmd.into(),
             subcommand: String::new(),
@@ -225,41 +238,53 @@ mod tests {
             avg_raw_tokens: avg_raw,
             total_raw_tokens: (avg_raw * runs as f64) as u64,
             savings_pct: savings,
-            // registered_ratio is no longer read by classify; populate to mirror SQL.
             registered_ratio: scope,
             in_scope_ratio: scope,
             reduced_ratio: if savings > 0.0 { 1.0 } else { 0.0 },
+            external_ratio: external,
             score: avg_raw * runs as f64 * (1.0 - savings / 100.0),
         }
     }
 
     #[test]
-    fn classify_built_in_when_subcommand_not_in_scope() {
-        // terraform (bare): plugin registered but no subcommand match → built-in.
-        let s = classify(&row("terraform", 7, 544.0, 33.2, 0.0));
-        assert_eq!(s.source, Source::BuiltIn);
+    fn classify_plugin_when_external_handler_owns_command() {
+        // terraform (bare): external plugin owns the command even though its
+        // filter doesn't match the bare subcommand — source is still "plugin"
+        // because that's where the user would tune.
+        let s = classify(&row("terraform", 7, 544.0, 33.2, 0.0, 1.0));
+        assert_eq!(s.source, Source::Plugin);
         assert_eq!(s.quality, Quality::Good);
     }
 
     #[test]
-    fn classify_weak_when_in_scope_but_low_savings() {
-        // git show: in scope, but filter barely trims.
-        let s = classify(&row("git", 15, 493.0, 8.8, 1.0));
-        assert_eq!(s.source, Source::Plugin);
+    fn classify_built_in_for_native_filter() {
+        // git show: native built-in handler — not user-installed, so "built-in".
+        let s = classify(&row("git", 15, 493.0, 8.8, 1.0, 0.0));
+        assert_eq!(s.source, Source::BuiltIn);
         assert_eq!(s.quality, Quality::Weak);
     }
 
     #[test]
-    fn classify_good_when_in_scope_and_saving() {
-        let s = classify(&row("ls", 109, 109.4, 55.1, 1.0));
-        assert_eq!(s.source, Source::Plugin);
+    fn classify_built_in_good_when_native_filter_saves() {
+        // ls: native built-in, filtering well — still "built-in" by source.
+        let s = classify(&row("ls", 109, 109.4, 55.1, 1.0, 0.0));
+        assert_eq!(s.source, Source::BuiltIn);
         assert_eq!(s.quality, Quality::Good);
     }
 
     #[test]
     fn classify_built_in_weak_when_no_plugin_and_no_savings() {
-        let s = classify(&row("npm", 5, 200.0, 0.0, 0.0));
+        // npm: no handler at all → built-in passthrough, weak.
+        let s = classify(&row("npm", 5, 200.0, 0.0, 0.0, 0.0));
         assert_eq!(s.source, Source::BuiltIn);
+        assert_eq!(s.quality, Quality::Weak);
+    }
+
+    #[test]
+    fn classify_plugin_weak_when_external_filter_underperforms() {
+        // terraform plan: external plugin, low savings → weak signal to extend.
+        let s = classify(&row("terraform", 4, 336.0, 8.0, 1.0, 1.0));
+        assert_eq!(s.source, Source::Plugin);
         assert_eq!(s.quality, Quality::Weak);
     }
 

@@ -23,13 +23,18 @@ pub struct InvocationRecord {
     pub subcommand: String,
     pub raw_tokens: u64,
     pub filtered_tokens: u64,
-    /// A plugin is registered for this command (regardless of subcommand scope).
+    /// A filter is registered for this command (regardless of subcommand scope).
+    /// This is true for both native built-ins and external plugins.
     pub had_plugin: bool,
     /// Plugin applies to *this* subcommand — i.e. matches its declared list,
     /// or plugin declares no subcommand restriction.
     pub in_scope: bool,
     /// Filter actually shrank output (filtered_tokens < raw_tokens).
     pub reduced: bool,
+    /// The handler is an external plugin from `~/.lowfat/plugins/` rather than
+    /// a native built-in compiled into the binary. Used to label the source
+    /// column in `lowfat history` so users can tell what they own vs what ships.
+    pub is_external_plugin: bool,
     pub exit_code: i32,
 }
 
@@ -48,6 +53,9 @@ pub struct HistoryRow {
     pub in_scope_ratio: f64,
     /// AVG(reduced): filter actually shrank output on average.
     pub reduced_ratio: f64,
+    /// AVG(is_external_plugin): handler came from `~/.lowfat/plugins/` rather
+    /// than the binary's compiled-in filters. Drives the source column.
+    pub external_ratio: f64,
     pub score: f64,
 }
 
@@ -62,6 +70,7 @@ pub struct InvocationExport {
     pub had_plugin: bool,
     pub in_scope: bool,
     pub reduced: bool,
+    pub is_external_plugin: bool,
     pub exit_code: i32,
 }
 
@@ -181,6 +190,27 @@ impl Db {
             "UPDATE invocations SET in_scope = had_plugin WHERE in_scope IS NULL",
             [],
         )?;
+
+        // `is_external_plugin` distinguishes external plugins (from
+        // `~/.lowfat/plugins/`) from native built-ins compiled into the
+        // binary. Without it, the source column conflates "lowfat ships a
+        // filter for this" with "the user installed a plugin for this".
+        let _ = conn.execute(
+            "ALTER TABLE invocations ADD COLUMN is_external_plugin INTEGER",
+            [],
+        );
+        // Legacy backfill: had_plugin=1 with command in the known native
+        // builtin set is treated as built-in. Anything else with had_plugin=1
+        // is treated as external. The native set is hardcoded to the names
+        // shipped at this migration's authorship — accurate for historical
+        // rows, since shipping new builtins requires a new binary anyway.
+        conn.execute(
+            "UPDATE invocations SET is_external_plugin = CASE \
+                WHEN had_plugin = 1 AND command NOT IN ('git','docker','ls') THEN 1 \
+                ELSE 0 END \
+             WHERE is_external_plugin IS NULL",
+            [],
+        )?;
         Ok(Db { conn })
     }
 
@@ -216,8 +246,8 @@ impl Db {
     /// once the table grows past `INVOCATIONS_CAP`.
     pub fn record_invocation(&self, rec: &InvocationRecord) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO invocations(timestamp, command, subcommand, raw_tokens, filtered_tokens, had_plugin, in_scope, reduced, exit_code)
-             VALUES(datetime('now'), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO invocations(timestamp, command, subcommand, raw_tokens, filtered_tokens, had_plugin, in_scope, reduced, is_external_plugin, exit_code)
+             VALUES(datetime('now'), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 rec.command,
                 rec.subcommand,
@@ -226,6 +256,7 @@ impl Db {
                 rec.had_plugin as i64,
                 rec.in_scope as i64,
                 rec.reduced as i64,
+                rec.is_external_plugin as i64,
                 rec.exit_code,
             ],
         )?;
@@ -316,7 +347,8 @@ impl Db {
     pub fn export_invocations(&self) -> Result<Vec<InvocationExport>> {
         let mut stmt = self.conn.prepare(
             "SELECT timestamp, command, subcommand, raw_tokens, filtered_tokens,
-                    had_plugin, COALESCE(in_scope,0), COALESCE(reduced,0), exit_code
+                    had_plugin, COALESCE(in_scope,0), COALESCE(reduced,0),
+                    COALESCE(is_external_plugin,0), exit_code
              FROM invocations ORDER BY id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -329,7 +361,8 @@ impl Db {
                 had_plugin: row.get::<_, i64>(5)? != 0,
                 in_scope: row.get::<_, i64>(6)? != 0,
                 reduced: row.get::<_, i64>(7)? != 0,
-                exit_code: row.get(8)?,
+                is_external_plugin: row.get::<_, i64>(8)? != 0,
+                exit_code: row.get(9)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -362,6 +395,7 @@ impl Db {
                     AVG(had_plugin) AS registered_ratio,
                     AVG(COALESCE(in_scope,0)) AS in_scope_ratio,
                     AVG(COALESCE(reduced,0)) AS reduced_ratio,
+                    AVG(COALESCE(is_external_plugin,0)) AS external_ratio,
                     SUM(filtered_tokens) AS score
              FROM invocations
              GROUP BY command, subcommand
@@ -381,7 +415,8 @@ impl Db {
                 registered_ratio: row.get(6)?,
                 in_scope_ratio: row.get(7)?,
                 reduced_ratio: row.get(8)?,
-                score: row.get(9)?,
+                external_ratio: row.get(9)?,
+                score: row.get(10)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -542,6 +577,7 @@ mod tests {
                 had_plugin: true,
                 in_scope: true,
                 reduced: true,
+                is_external_plugin: false,
                 exit_code: 0,
             }).unwrap();
         }
@@ -562,6 +598,7 @@ mod tests {
                 command: "cargo".into(), subcommand: "build".into(),
                 raw_tokens: 2000, filtered_tokens: 1900,
                 had_plugin: false, in_scope: false, reduced: true,
+                is_external_plugin: false,
                 exit_code: 0,
             }).unwrap();
         }
@@ -571,6 +608,7 @@ mod tests {
                 command: "git".into(), subcommand: "status".into(),
                 raw_tokens: 30, filtered_tokens: 3,
                 had_plugin: true, in_scope: true, reduced: true,
+                is_external_plugin: false,
                 exit_code: 0,
             }).unwrap();
         }
@@ -616,6 +654,7 @@ mod tests {
                 had_plugin: true,
                 in_scope: true,
                 reduced: true,
+                is_external_plugin: false,
                 exit_code: 0,
             })
             .unwrap();
@@ -668,6 +707,7 @@ mod tests {
                 had_plugin: false,
                 in_scope: false,
                 reduced: true,
+                is_external_plugin: false,
                 exit_code: 0,
             })
             .unwrap();
@@ -680,6 +720,7 @@ mod tests {
             had_plugin: false,
             in_scope: false,
             reduced: false,
+            is_external_plugin: false,
             exit_code: 0,
         })
         .unwrap();
@@ -712,6 +753,7 @@ mod tests {
                 had_plugin: true,
                 in_scope: true,
                 reduced: true,
+                is_external_plugin: false,
                 exit_code: 0,
             })
             .unwrap();
@@ -726,6 +768,7 @@ mod tests {
                 had_plugin: false,
                 in_scope: false,
                 reduced: false,
+                is_external_plugin: false,
                 exit_code: 0,
             })
             .unwrap();
@@ -751,6 +794,7 @@ mod tests {
                 had_plugin: false,
                 in_scope: false,
                 reduced: true,
+                is_external_plugin: false,
                 exit_code: 0,
             })
             .unwrap();

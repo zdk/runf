@@ -43,6 +43,11 @@ pub fn run(args: &[String]) -> i32 {
     let pipeline = resolve_pipeline(cmd, exit_code, &raw, &config, &filter_name,
         &external_plugins, &external_map);
 
+    // Capture native-vs-external before `all_filters` is moved into plugin_map.
+    // Native builtins shadow any external plugin of the same name in
+    // `resolve_filter_name`, so a hit here means the handler is not external.
+    let cmd_is_native_builtin = all_filters.contains_key(cmd);
+
     // Build plugin map for pipeline execution: builtins + loaded community plugins
     let mut plugin_map: HashMap<String, Box<dyn FilterPlugin>> = all_filters;
     for stage in &pipeline.stages {
@@ -93,6 +98,10 @@ pub fn run(args: &[String]) -> i32 {
         // `known` means "no subcommand restriction" — treat as universal.
         let in_scope = filter_name.is_some()
             && (known.is_empty() || known.iter().any(|s| s == &subcommand));
+        // Distinguish where the handler comes from. `resolve_filter_name` checks
+        // native builtins first, so a builtin shadows any external plugin of the
+        // same name — meaning a hit in `all_filters` rules out the external path.
+        let is_external_plugin = filter_name.is_some() && !cmd_is_native_builtin;
         let raw_tokens = lowfat_core::tokens::estimate_tokens(&raw) as u64;
         let filtered_tokens = lowfat_core::tokens::estimate_tokens(&filtered) as u64;
         let _ = db.record_invocation(&InvocationRecord {
@@ -103,6 +112,7 @@ pub fn run(args: &[String]) -> i32 {
             had_plugin: filter_name.is_some(),
             in_scope,
             reduced: filtered_tokens < raw_tokens,
+            is_external_plugin,
             exit_code,
         });
     }
@@ -287,6 +297,7 @@ fn passthrough(cmd: &str, args: &[String], config: &RunfConfig) -> i32 {
             had_plugin: false,
             in_scope: false,
             reduced: false,
+            is_external_plugin: false,
             exit_code,
         });
     }
