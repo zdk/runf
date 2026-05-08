@@ -8,7 +8,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.9"
+version = "0.3.10"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["zdk <di.warachet@gmail.com>"]
@@ -26,6 +26,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 
 # Internal crates (version required for crates.io publish)
-lowfat-core = { path = "crates/lowfat-core", version = "=0.3.9" }
-lowfat-plugin = { path = "crates/lowfat-plugin", version = "=0.3.9" }
-lowfat-runner = { path = "crates/lowfat-runner", version = "=0.3.9" }
+lowfat-core = { path = "crates/lowfat-core", version = "=0.3.10" }
+lowfat-plugin = { path = "crates/lowfat-plugin", version = "=0.3.10" }
+lowfat-runner = { path = "crates/lowfat-runner", version = "=0.3.10" }
