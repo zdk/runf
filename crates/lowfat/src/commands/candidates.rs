@@ -10,53 +10,71 @@ const YELLOW: &str = "\x1b[33m";
 const MAGENTA: &str = "\x1b[35m";
 const WHITE: &str = "\x1b[97m";
 
-/// Per-row diagnosis — what the user should *do* about this command.
+/// Per-row diagnosis on two independent axes:
+/// `source` — who handled the output (plugin vs lowfat's built-in passthrough);
+/// `quality` — how well it filtered (action signal: `weak` rows want tuning).
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Status {
-    /// No plugin registered for this command → write one.
-    NoPlugin,
-    /// Plugin exists but doesn't declare this subcommand → extend it.
-    OutOfScope,
-    /// Filter applies but barely trims on non-trivial output → tune it.
-    Weak,
-    /// Filter is doing its job.
-    Good,
+struct Status {
+    source: Source,
+    quality: Quality,
 }
 
-impl Status {
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Source {
+    /// A registered plugin claims this command+subcommand.
+    Plugin,
+    /// No plugin handles this row — output is lowfat's built-in passthrough.
+    /// This includes the "registered but subcommand not declared" case: the
+    /// plugin doesn't actually run for it, so the row is effectively built-in.
+    BuiltIn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Quality {
+    /// Savings ≥ 20% — filter (or built-in trim) is pulling its weight.
+    Good,
+    /// Savings < 20% — needs attention (tune the plugin, or write/extend one).
+    Weak,
+}
+
+impl Source {
     fn label(self) -> &'static str {
         match self {
-            Status::NoPlugin => "no-plugin",
-            Status::OutOfScope => "out-of-scope",
-            Status::Weak => "weak",
-            Status::Good => "good",
-        }
-    }
-
-    /// Magenta = action item, dim = already handled.
-    fn color(self) -> &'static str {
-        match self {
-            Status::NoPlugin | Status::OutOfScope | Status::Weak => MAGENTA,
-            Status::Good => DIM,
+            Source::Plugin => "plugin",
+            Source::BuiltIn => "built-in",
         }
     }
 }
 
-/// Classify a row from the three signal ratios. Order matters: each branch
-/// assumes the prior ones didn't match, so the decision tree reads:
-///   no plugin? → out-of-scope? → weak? → good.
-fn classify(r: &HistoryRow) -> Status {
-    if r.registered_ratio < 0.5 {
-        Status::NoPlugin
-    } else if r.in_scope_ratio < 0.5 {
-        Status::OutOfScope
-    } else if r.savings_pct < 20.0 {
-        // In scope but savings are poor — filter needs work (or raw was tiny,
-        // but the default trivia filter already excludes those).
-        Status::Weak
-    } else {
-        Status::Good
+impl Quality {
+    fn label(self) -> &'static str {
+        match self {
+            Quality::Good => "good",
+            Quality::Weak => "weak",
+        }
     }
+
+    /// Magenta = action item (weak), dim = already handled (good).
+    fn color(self) -> &'static str {
+        match self {
+            Quality::Weak => MAGENTA,
+            Quality::Good => DIM,
+        }
+    }
+}
+
+fn classify(r: &HistoryRow) -> Status {
+    let source = if r.in_scope_ratio >= 0.5 {
+        Source::Plugin
+    } else {
+        Source::BuiltIn
+    };
+    let quality = if r.savings_pct >= 20.0 {
+        Quality::Good
+    } else {
+        Quality::Weak
+    };
+    Status { source, quality }
 }
 
 fn fmt_tokens(n: f64) -> String {
@@ -73,11 +91,11 @@ fn fmt_total(n: u64) -> String {
     fmt_tokens(n as f64)
 }
 
-/// Ten-cell bar rendered with `█ ▒ ░` for 0/half/full shading. Score is
-/// normalised against the max in the current result set, so the top row
-/// always shows a full bar — the bar conveys relative pecking order, not
-/// absolute token counts (that's what `cost` is for).
-fn opportunity_bar(score: f64, max_score: f64) -> String {
+/// Ten-cell bar of post-filter token volume, normalised against the max
+/// in the current result set — top row always shows a full bar. Conveys
+/// relative pecking order (which rows still consume the most context),
+/// not absolute counts (that's what `cost` is for).
+fn volume_bar(score: f64, max_score: f64) -> String {
     if max_score <= 0.0 {
         return "░".repeat(10);
     }
@@ -114,11 +132,11 @@ pub fn run(limit: usize, show_all: bool) -> Result<()> {
 
     let max_score = rows.iter().map(|r| r.score).fold(0.0_f64, f64::max);
 
-    // Header: cost is total raw tokens consumed; opportunity is the score
-    // normalised against max_score (see opportunity_bar).
+    // Header: cost is total raw tokens consumed; volume is the post-filter
+    // token volume normalised against max_score (see volume_bar).
     println!(
-        "  {DIM}{:>3}  {:<25} {:>5}  {:>8}  {:>8}  {:>8}  {:<13}  {:<14}{RESET}",
-        "#", "command", "runs", "avg raw", "cost", "savings", "status", "opportunity"
+        "  {DIM}{:>3}  {:<25} {:>5}  {:>8}  {:>8}  {:>8}  {:<8}  {:<6}  {:<6}{RESET}",
+        "#", "command", "runs", "avg raw", "cost", "savings", "source", "status", "volume"
     );
 
     for (i, r) in rows.iter().enumerate() {
@@ -129,10 +147,11 @@ pub fn run(limit: usize, show_all: bool) -> Result<()> {
             format!("{} {}", r.command, r.subcommand)
         };
         let status = classify(r);
+        let source_cell = format!("{DIM}{:<8}{RESET}", status.source.label());
         let status_cell = format!(
-            "{}{:<13}{RESET}",
-            status.color(),
-            status.label()
+            "{}{:<6}{RESET}",
+            status.quality.color(),
+            status.quality.label()
         );
         // Savings pct colour: dim when done, yellow when mid, magenta for weak.
         let save_color = if r.savings_pct >= 50.0 {
@@ -142,15 +161,16 @@ pub fn run(limit: usize, show_all: bool) -> Result<()> {
         } else {
             MAGENTA
         };
-        let bar = opportunity_bar(r.score, max_score);
+        let bar = volume_bar(r.score, max_score);
         println!(
-            "  {BOLD}{:>3}{RESET}  {CYAN}{:<25}{RESET} {:>4}x  {:>8}  {:>8}  {save_color}{:>7.1}%{RESET}  {}  {}",
+            "  {BOLD}{:>3}{RESET}  {CYAN}{:<25}{RESET} {:>4}x  {:>8}  {:>8}  {save_color}{:>7.1}%{RESET}  {}  {}  {}",
             rank,
             label,
             r.runs,
             fmt_tokens(r.avg_raw_tokens),
             fmt_total(r.total_raw_tokens),
             r.savings_pct,
+            source_cell,
             status_cell,
             bar,
         );
@@ -183,13 +203,10 @@ pub fn run(limit: usize, show_all: bool) -> Result<()> {
     }
     println!();
     println!(
-        "  {DIM}Action key:{RESET} {MAGENTA}no-plugin{RESET}{DIM} → scaffold ({BOLD}lowfat plugin new <cmd>{RESET}{DIM}){RESET}"
+        "  {DIM}Action key:{RESET} {MAGENTA}weak + plugin{RESET}{DIM}   → tune the filter (likely under-matching patterns){RESET}"
     );
     println!(
-        "              {MAGENTA}out-of-scope{RESET}{DIM} → extend plugin's declared subcommands{RESET}"
-    );
-    println!(
-        "              {MAGENTA}weak{RESET}{DIM} → tune the filter (likely under-matching patterns){RESET}"
+        "              {MAGENTA}weak + built-in{RESET}{DIM} → scaffold or extend a plugin ({BOLD}lowfat plugin new <cmd>{RESET}{DIM}){RESET}"
     );
     println!();
 
@@ -200,14 +217,7 @@ pub fn run(limit: usize, show_all: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn row(
-        cmd: &str,
-        runs: u64,
-        avg_raw: f64,
-        savings: f64,
-        reg: f64,
-        scope: f64,
-    ) -> HistoryRow {
+    fn row(cmd: &str, runs: u64, avg_raw: f64, savings: f64, scope: f64) -> HistoryRow {
         HistoryRow {
             command: cmd.into(),
             subcommand: String::new(),
@@ -215,7 +225,8 @@ mod tests {
             avg_raw_tokens: avg_raw,
             total_raw_tokens: (avg_raw * runs as f64) as u64,
             savings_pct: savings,
-            registered_ratio: reg,
+            // registered_ratio is no longer read by classify; populate to mirror SQL.
+            registered_ratio: scope,
             in_scope_ratio: scope,
             reduced_ratio: if savings > 0.0 { 1.0 } else { 0.0 },
             score: avg_raw * runs as f64 * (1.0 - savings / 100.0),
@@ -223,42 +234,41 @@ mod tests {
     }
 
     #[test]
-    fn classify_no_plugin_when_unregistered() {
-        assert_eq!(classify(&row("npm", 5, 200.0, 0.0, 0.0, 0.0)), Status::NoPlugin);
-    }
-
-    #[test]
-    fn classify_out_of_scope_when_registered_but_subcommand_unmatched() {
-        // git commit: plugin exists (registered) but git-compact doesn't declare `commit`.
-        assert_eq!(
-            classify(&row("git", 5, 200.0, 0.0, 1.0, 0.0)),
-            Status::OutOfScope
-        );
+    fn classify_built_in_when_subcommand_not_in_scope() {
+        // terraform (bare): plugin registered but no subcommand match → built-in.
+        let s = classify(&row("terraform", 7, 544.0, 33.2, 0.0));
+        assert_eq!(s.source, Source::BuiltIn);
+        assert_eq!(s.quality, Quality::Good);
     }
 
     #[test]
     fn classify_weak_when_in_scope_but_low_savings() {
         // git show: in scope, but filter barely trims.
-        assert_eq!(
-            classify(&row("git", 15, 493.0, 8.8, 1.0, 1.0)),
-            Status::Weak
-        );
+        let s = classify(&row("git", 15, 493.0, 8.8, 1.0));
+        assert_eq!(s.source, Source::Plugin);
+        assert_eq!(s.quality, Quality::Weak);
     }
 
     #[test]
     fn classify_good_when_in_scope_and_saving() {
-        assert_eq!(
-            classify(&row("ls", 109, 109.4, 55.1, 1.0, 1.0)),
-            Status::Good
-        );
+        let s = classify(&row("ls", 109, 109.4, 55.1, 1.0));
+        assert_eq!(s.source, Source::Plugin);
+        assert_eq!(s.quality, Quality::Good);
     }
 
     #[test]
-    fn opportunity_bar_scales_to_max() {
-        assert_eq!(opportunity_bar(100.0, 100.0), "██████████");
-        assert_eq!(opportunity_bar(50.0, 100.0), "█████░░░░░");
-        assert_eq!(opportunity_bar(0.0, 100.0), "░░░░░░░░░░");
+    fn classify_built_in_weak_when_no_plugin_and_no_savings() {
+        let s = classify(&row("npm", 5, 200.0, 0.0, 0.0));
+        assert_eq!(s.source, Source::BuiltIn);
+        assert_eq!(s.quality, Quality::Weak);
+    }
+
+    #[test]
+    fn volume_bar_scales_to_max() {
+        assert_eq!(volume_bar(100.0, 100.0), "██████████");
+        assert_eq!(volume_bar(50.0, 100.0), "█████░░░░░");
+        assert_eq!(volume_bar(0.0, 100.0), "░░░░░░░░░░");
         // Guard: no rows at all → all-empty bar, not a panic.
-        assert_eq!(opportunity_bar(5.0, 0.0), "░░░░░░░░░░");
+        assert_eq!(volume_bar(5.0, 0.0), "░░░░░░░░░░");
     }
 }
