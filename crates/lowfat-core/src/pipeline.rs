@@ -1,7 +1,6 @@
 use crate::level::Level;
 use crate::tokens::estimate_tokens;
 use regex::Regex;
-use std::sync::LazyLock;
 
 /// A resolved pipeline set: normal chain + optional conditional chains.
 #[derive(Debug, Clone)]
@@ -309,44 +308,10 @@ pub fn proc_normalize(text: &str) -> String {
     result
 }
 
-/// Secret patterns for redaction. Compiled once via LazyLock.
-/// Patterns sourced from gitleaks and common secret formats.
-static SECRET_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-    vec![
-        // AWS access key ID
-        (Regex::new(r"(?i)(AKIA[0-9A-Z]{16})").unwrap(), "[REDACTED:aws-key]"),
-        // AWS secret access key (40-char base64 after common key names)
-        (Regex::new(r"(?i)(aws_secret_access_key|aws_secret_key)\s*[=:]\s*\S+").unwrap(), "$1=[REDACTED:aws-secret]"),
-        // GitHub tokens (ghp_, gho_, ghs_, ghr_, github_pat_)
-        (Regex::new(r"ghp_[A-Za-z0-9]{36,}|gho_[A-Za-z0-9]{36,}|ghs_[A-Za-z0-9]{36,}|ghr_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}").unwrap(), "[REDACTED:github-token]"),
-        // GitLab tokens (glpat-)
-        (Regex::new(r"glpat-[A-Za-z0-9\-_]{20,}").unwrap(), "[REDACTED:gitlab-token]"),
-        // Slack tokens (xoxb-, xoxp-, xoxs-, xoxa-, xoxr-)
-        (Regex::new(r"xox[bpsar]-[A-Za-z0-9\-]{24,}").unwrap(), "[REDACTED:slack-token]"),
-        // Generic API key/token/secret in key=value or key: value
-        (Regex::new(r#"(?i)(api[_-]?key|api[_-]?secret|api[_-]?token|access[_-]?token|secret[_-]?key|auth[_-]?token|private[_-]?key)\s*[=:]\s*['"]?([A-Za-z0-9/+=\-_.]{16,})['"]?"#).unwrap(), "$1=[REDACTED]"),
-        // Bearer tokens
-        (Regex::new(r"(?i)(Bearer\s+)[A-Za-z0-9\-_.~+/]+=*").unwrap(), "${1}[REDACTED:bearer]"),
-        // JWT (three base64url segments separated by dots)
-        (Regex::new(r"eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_.+/=]+").unwrap(), "[REDACTED:jwt]"),
-        // PEM private keys (multiline: match line-by-line since regex crate is single-line by default)
-        (Regex::new(r"(?s)-----BEGIN[A-Z ]*PRIVATE KEY-----.*?-----END[A-Z ]*PRIVATE KEY-----").unwrap(), "[REDACTED:private-key]"),
-        // Passwords in URLs (proto://user:pass@host)
-        (Regex::new(r"(://[^:]+:)[^@\s]+(@)").unwrap(), "${1}[REDACTED]${2}"),
-        // Heroku API key
-        (Regex::new(r"(?i)(HEROKU_API_KEY)\s*[=:]\s*\S+").unwrap(), "$1=[REDACTED:heroku]"),
-        // Generic hex secrets (32+ hex chars after key-like names)
-        (Regex::new(r#"(?i)(secret|token|password|passwd|credential)\s*[=:]\s*['"]?([0-9a-f]{32,})['"]?"#).unwrap(), "$1=[REDACTED]"),
-    ]
-});
-
-/// Redact secrets from text. Replaces known secret patterns with [REDACTED].
+/// Redact secrets via the configured ruleset — built-in defaults layered
+/// with `redact.conf` (global + project). See [`crate::redact`].
 pub fn proc_redact_secrets(text: &str) -> String {
-    let mut result = text.to_string();
-    for (pattern, replacement) in SECRET_PATTERNS.iter() {
-        result = pattern.replace_all(&result, *replacement).to_string();
-    }
-    result
+    crate::redact::redact(text)
 }
 
 /// Keep or reject lines matching a regex pattern.

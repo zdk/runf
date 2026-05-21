@@ -114,6 +114,12 @@ impl RunfConfig {
             }
         }
 
+        // Redaction ruleset: built-in defaults < global redact.conf <
+        // project redact.conf (beside the discovered .lowfat).
+        let (global_redact, project_redact) =
+            crate::redact::paths(&home_dir, find_config().as_deref());
+        crate::redact::init(Some(&global_redact), project_redact.as_deref());
+
         RunfConfig {
             level,
             disabled,

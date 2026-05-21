@@ -132,13 +132,33 @@ pipeline.deploy.large = grep:ERROR|FAIL | token-budget:500  # output > 10KB
 | `token-budget`   | `token-budget:N`       | Trim to ~N tokens                                     |
 | `dedup-blank`    | `dedup-blank`          | Collapse consecutive blank lines                      |
 | `normalize`      | `normalize`            | Trim whitespace, collapse blanks (runs automatically) |
-| `redact-secrets` | `redact-secrets`       | Mask API keys, tokens, passwords                      |
+| `redact-secrets` | `redact-secrets`       | Mask secrets — built-in patterns + custom `redact.conf` |
 
 Built-ins can be mixed with plugins in pipelines:
 
 ```
 pipeline.git = strip-ansi | git-compact | truncate:100
 ```
+
+### Custom redaction — `redact.conf`
+
+`redact-secrets` ships defaults for common secrets (AWS / GitHub / GitLab / Slack keys, JWTs, bearer tokens, PEM private keys, passwords in URLs). Compliance patterns differ per organisation, so add your own in a `redact.conf`:
+
+- **Global** — `~/.lowfat/redact.conf` (org-wide policy)
+- **Project** — `redact.conf` beside `.lowfat` (repo-specific, version-controlled)
+
+Both layer on top of the defaults. One rule per line, `<regex> => <replacement>`:
+
+```
+# redact.conf
+EMP-[0-9]{6}                => [EMPLOYEE-ID]
+(MRN:?\s*)[0-9]{8}          => ${1}[REDACTED:mrn]
+[A-Za-z0-9._%+-]+@acme\.com => [REDACTED:email]
+```
+
+`$1` / `${1}` reference capture groups for partial masking; `#` starts a comment. A bare `!no-defaults` line drops the built-in baseline — use it when compliance requires *only* your patterns.
+
+Redaction runs in lowfat's trusted core, so — unlike a plugin — it can't degrade to passthrough. A malformed pattern is reported on stderr; lowfat then falls back to the built-in defaults until you fix the file.
 
 ## Finding plugin gaps with `history`
 
