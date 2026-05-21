@@ -8,9 +8,9 @@ Most commands can be filtered with a one-liner in `.lowfat` (see [CONFIG.md](CON
 
 A plugin lives at `~/.lowfat/plugins/<category>/<name>/` and ships in one of two formats:
 
-| Format | When to use |
-|---|---|
-| **`filter.lf`** | Default for new plugins. Declarative rules parsed in-process; shell + python escape hatches for the rare cases that can't be expressed in built-in ops. |
+| Format          | When to use                                                                                                                                                                |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`filter.lf`** | Default for new plugins. Declarative **lf-filter** rules parsed in-process; shell + python escape hatches for the rare cases that can't be expressed in built-in ops.      |
 | **`filter.sh`** | Legacy. POSIX shell script reading stdin → writing stdout. Still supported — when both files exist `filter.lf` is auto-detected; set `runtime.entry` to force `filter.sh`. |
 
 ## Quick start
@@ -43,9 +43,9 @@ subcommands = ["get", "describe", "logs", "apply"]
 
 ---
 
-# The `.lf` DSL
+# The lf-filter DSL
 
-A `.lf` file is a sequence of `define` blocks and `rule` blocks. The runner picks the first rule whose selector matches `(subcommand, level)` and runs its ops top-to-bottom.
+**lf-filter** is lowfat's declarative plugin DSL. A `.lf` file is a sequence of `define` blocks and `rule` blocks; the runner picks the first rule whose selector matches `(subcommand, level)` and runs its ops top-to-bottom.
 
 ## Selectors
 
@@ -60,15 +60,15 @@ First match wins. Order matters: put specific rules before catch-alls.
 
 ## Ops (built-in, run in-process)
 
-| Op | Form | What it does |
-|---|---|---|
-| `keep` | `keep /regex/` | Keep lines matching the regex |
-| `drop` | `drop /regex/` | Drop lines matching the regex |
-| `head` | `head N` or `head auto` | First N lines (`auto` = level-scaled: 15/30/60 for ultra/full/lite) |
-| `tail` | `tail N` or `tail auto` | Last N lines |
-| `else` | `else "text"` | If state is empty, emit literal `text` |
-| `else-shell:` | `else-shell: <cmd>` | If state is empty, run `<cmd>` with the **original** raw input |
-| `split` | `split /regex/` + `pre:` / `post:` blocks | Split input at first matching line, run separate chains on each half |
+| Op            | Form                                      | What it does                                                         |
+| ------------- | ----------------------------------------- | -------------------------------------------------------------------- |
+| `keep`        | `keep /regex/`                            | Keep lines matching the regex                                        |
+| `drop`        | `drop /regex/`                            | Drop lines matching the regex                                        |
+| `head`        | `head N` or `head auto`                   | First N lines (`auto` = level-scaled: 15/30/60 for ultra/full/lite)  |
+| `tail`        | `tail N` or `tail auto`                   | Last N lines                                                         |
+| `else`        | `else "text"`                             | If state is empty, emit literal `text`                               |
+| `else-shell:` | `else-shell: <cmd>`                       | If state is empty, run `<cmd>` with the **original** raw input       |
+| `split`       | `split /regex/` + `pre:` / `post:` blocks | Split input at first matching line, run separate chains on each half |
 
 Regex uses `/.../` delimiters (escape `/` as `\/`). Built-in ops are pure Rust — no subprocess overhead.
 
@@ -76,10 +76,10 @@ Ops run top-to-bottom as a pipeline — each one receives the previous op's outp
 
 ## Escape hatches (subprocess)
 
-| Op | Form | Notes |
-|---|---|---|
-| `shell:` | `shell: <inline>` or `shell: \|` + indented block | Runs under `sh -c`. Env: `$level`, `$sub`, `$args`, `$exit` |
-| `python:` | `python: \|` + indented block | `python3 -c` for plain bodies; `uv run --script` for bodies with a `# /// script` PEP 723 header |
+| Op        | Form                                              | Notes                                                                                            |
+| --------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `shell:`  | `shell: <inline>` or `shell: \|` + indented block | Runs under `sh -c`. Env: `$level`, `$sub`, `$args`, `$exit`                                      |
+| `python:` | `python: \|` + indented block                     | `python3 -c` for plain bodies; `uv run --script` for bodies with a `# /// script` PEP 723 header |
 
 ## Macros: `define`
 
@@ -257,12 +257,12 @@ uv = "*"
 
 ## Filter contract
 
-| Level | What to emit |
-|---|---|
-| `ultra` | Verdict line(s) only — what the AI needs to decide next |
-| `full`  | Strip progress chatter / banner prose; keep diffs / errors / structure |
-| `lite`  | Gentle trim, higher row caps |
-| `$exit != 0` | Be conservative — preserve error blocks |
+| Level        | What to emit                                                           |
+| ------------ | ---------------------------------------------------------------------- |
+| `ultra`      | Verdict line(s) only — what the AI needs to decide next                |
+| `full`       | Strip progress chatter / banner prose; keep diffs / errors / structure |
+| `lite`       | Gentle trim, higher row caps                                           |
+| `$exit != 0` | Be conservative — preserve error blocks                                |
 
 `$sub` is the first arg of the original command (`get`, `describe`, …). Walk `$args` when the subcommand alone isn't enough (resource type, output flags). Empty output = passthrough (lowfat falls back to the original).
 
@@ -307,17 +307,17 @@ lowfat plugin doctor
 
 ---
 
-# Legacy: writing a `filter.sh` (shell)
+# Writing as `filter.sh` (shell)
 
-Still supported. The script reads stdin, writes stdout, and gets these env vars:
+The script reads stdin, writes stdout, and gets these env vars:
 
-| Env var | Value | Example (`lowfat kubectl get pods -n kube-system`) |
-|---------|-------|----|
-| `$LOWFAT_COMMAND`     | top-level command | `kubectl` |
-| `$LOWFAT_SUBCOMMAND`  | first argument | `get` |
-| `$LOWFAT_ARGS`        | all arguments joined | `get pods -n kube-system` |
-| `$LOWFAT_LEVEL`       | `lite` / `full` / `ultra` | `full` |
-| `$LOWFAT_EXIT_CODE`   | command's exit code | `0` |
+| Env var              | Value                     | Example (`lowfat kubectl get pods -n kube-system`) |
+| -------------------- | ------------------------- | -------------------------------------------------- |
+| `$LOWFAT_COMMAND`    | top-level command         | `kubectl`                                          |
+| `$LOWFAT_SUBCOMMAND` | first argument            | `get`                                              |
+| `$LOWFAT_ARGS`       | all arguments joined      | `get pods -n kube-system`                          |
+| `$LOWFAT_LEVEL`      | `lite` / `full` / `ultra` | `full`                                             |
+| `$LOWFAT_EXIT_CODE`  | command's exit code       | `0`                                                |
 
 The recurring shape:
 
@@ -341,8 +341,6 @@ case "$SUB" in
     ;;
 esac
 ```
-
-That `case`/`level`/`limit` boilerplate is exactly what the `.lf` DSL exists to absorb — most shell plugins are 70% boilerplate around a few `grep`/`head` lines. Pick `.lf` for new plugins; keep existing `.sh` ones unless you have a reason to rewrite.
 
 ---
 
@@ -393,8 +391,9 @@ Copy-paste this into Claude Code (or another tool-using agent) and replace `<COM
 Create a lowfat plugin to filter `<COMMAND>` output for LLM contexts.
 
 Before writing code:
-1. Read docs/PLUGINS.md to learn the .lf DSL: ops (keep/drop/head/tail/
-   else, shell:, python:), selectors (sub, level), define macros, split.
+1. Read docs/PLUGINS.md to learn lf-filter, lowfat's plugin DSL: ops
+   (keep/drop/head/tail/else, shell:, python:), selectors (sub, level),
+   define macros, split.
 2. Ask me: which subcommands to specialize, and what's noise vs. signal
    in this command's output.
 
