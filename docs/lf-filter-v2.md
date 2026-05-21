@@ -36,7 +36,7 @@ status:
 
 # cascade body
 diff:
-    if exit failed:    passthrough
+    if exit failed:    raw
     elif level ultra:  compact 30
     elif --stat:       compact 40
     else:              compact 200
@@ -93,8 +93,8 @@ it is why a guard reads the same to a newcomer as to `lowfat plugin doctor`.
 Unchanged from v1: `keep` `drop` `head` `tail` `split` `shell:` `python:`, and
 macro calls. Two changes:
 
-- **New — `passthrough`**: emit the stream unchanged. The conservative arm:
-  `if exit failed: passthrough`.
+- **New — `raw`**: emit the stream unchanged. The conservative arm:
+  `if exit failed: raw`. (`passthrough` is accepted as a legacy alias.)
 - **Renamed — `else "text"` → `or "text"`** (and `else-shell:` → `or-shell:`),
   because `else` is now the cascade default arm. This op fires when the stream
   filtered down to *empty* — a stream-derived condition, distinct from the
@@ -122,7 +122,7 @@ status:
     head 30
 
 diff:
-    if exit failed:    passthrough
+    if exit failed:    raw
     elif level ultra:  compact 30
     elif --stat:       compact 40
     else:              compact 200
@@ -156,9 +156,9 @@ one runs" self-evident.
 
 | Stage | Work                                                                  |
 | ----- | --------------------------------------------------------------------- |
-| 1     | AST — `Op::Cascade(Vec<Branch>)`, `Op::Passthrough`, `Guard` / `Atom`  |
+| 1     | AST — `Op::Cascade(Vec<Branch>)`, `Op::Raw`, `Guard` / `Atom`          |
 | 2     | Parser — `if` / `elif` / `else`, guard parsing, glob selectors        |
-| 3     | Executor — cascade dispatch, guard eval, `passthrough`                |
+| 3     | Executor — cascade dispatch, guard eval, `raw`                        |
 | 4     | Rename `else` → `or` / `else-shell:` → `or-shell:` (keep legacy alias) |
 | 5     | `execute_explain` / `describe_op` cover the new ops                   |
 | 6     | Migrate shipped plugins (git-compact, kubectl-compact)                |

@@ -57,7 +57,7 @@ pub enum Op {
     OrShell(String),
     Shell(String),
     Python(String),
-    Passthrough,
+    Raw,
     MacroCall {
         name: String,
         args: Vec<MacroArg>,
@@ -197,6 +197,7 @@ const OP_KEYWORDS: &[&str] = &[
     "shell:",
     "python:",
     "split",
+    "raw",
     "passthrough",
     "if",
     "elif",
@@ -493,7 +494,8 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Op::OrShell(body))
             }
-            "passthrough" => Ok(Op::Passthrough),
+            // `raw` is canonical; `passthrough` is a v0.5.0 legacy alias.
+            "raw" | "passthrough" => Ok(Op::Raw),
             "shell:" => Ok(Op::Shell(self.parse_block_body(
                 text,
                 head,
@@ -660,8 +662,8 @@ impl<'a> Parser<'a> {
                     ops.push(Op::OrShell(body));
                     remaining = "";
                 }
-                "passthrough" => {
-                    ops.push(Op::Passthrough);
+                "raw" | "passthrough" => {
+                    ops.push(Op::Raw);
                     remaining = remaining[head.len()..].trim_start();
                 }
                 "keep" | "drop" => {
@@ -1141,7 +1143,7 @@ fn describe_op(op: &Op) -> String {
         Op::Tail(arg) => format!("tail {}", describe_head(arg)),
         Op::Or(s) => format!("or {s:?}"),
         Op::OrShell(s) => format!("or-shell: {}", first_line(s)),
-        Op::Passthrough => "passthrough".to_string(),
+        Op::Raw => "raw".to_string(),
         Op::Cascade(branches) => format!("cascade ({} arms)", branches.len()),
         Op::Shell(s) => format!("shell: {}", first_line(s)),
         Op::Python(s) => {
@@ -1221,7 +1223,7 @@ fn apply_op(
                 Ok(state.to_string())
             }
         }
-        Op::Passthrough => Ok(state.to_string()),
+        Op::Raw => Ok(state.to_string()),
         Op::Cascade(branches) => {
             for br in branches {
                 let hit = match &br.guard {
@@ -2149,7 +2151,7 @@ foo:
         let rs = parse_ok(
             r#"
 diff:
-    if exit failed: passthrough
+    if exit failed: raw
     elif level ultra: head 5
     else: head 99
 "#,
@@ -2170,7 +2172,7 @@ diff:
         let rs = parse_ok(
             r#"
 diff:
-    if exit failed: passthrough
+    if exit failed: raw
     else: head 1
 "#,
         );
@@ -2209,10 +2211,13 @@ diff:
     }
 
     #[test]
-    fn exec_passthrough_is_identity() {
-        let rs = parse_ok("diff:\n    passthrough\n");
-        let out = execute(&rs, &ctx("diff", Level::Full), "x\ny\n").unwrap();
-        assert_eq!(out, "x\ny\n");
+    fn exec_raw_is_identity() {
+        // `raw` is canonical; `passthrough` is a legacy alias for the same op.
+        for kw in ["raw", "passthrough"] {
+            let rs = parse_ok(&format!("diff:\n    {kw}\n"));
+            let out = execute(&rs, &ctx("diff", Level::Full), "x\ny\n").unwrap();
+            assert_eq!(out, "x\ny\n");
+        }
     }
 
     #[test]

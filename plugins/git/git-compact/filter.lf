@@ -38,7 +38,7 @@ status:
 # ── diff ──────────────────────────────────────────────────────────
 diff:
     if exit failed:
-        passthrough
+        raw
     elif level ultra:
         compact-diff 30
         or-shell: awk 'NF' | head -50

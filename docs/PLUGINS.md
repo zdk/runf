@@ -70,7 +70,7 @@ in the rule body — not the selector.
 | `tail`        | `tail N` or `tail auto`                   | Last N lines                                                         |
 | `or`          | `or "text"`                               | If state is empty, emit literal `text` (`else` = legacy alias)       |
 | `or-shell:`   | `or-shell: <cmd>`                         | If state is empty, run `<cmd>` with the **original** raw input       |
-| `passthrough` | `passthrough`                             | Emit the stream unchanged — the conservative arm of a cascade        |
+| `raw`         | `raw`                                     | Emit the stream unchanged — the conservative arm of a cascade (`passthrough` = legacy alias) |
 | `split`       | `split /regex/` + `pre:` / `post:` blocks | Split input at first matching line, run separate chains on each half |
 
 Regex uses `/.../` delimiters (escape `/` as `\/`). Built-in ops are pure Rust — no subprocess overhead.
@@ -83,7 +83,7 @@ A rule body is either a **pipeline** (the ops above) or a **cascade**: `if` / `e
 
 ```awk
 diff:
-    if exit failed:    passthrough
+    if exit failed:    raw
     elif level ultra:  compact-diff 30
     elif --stat:       compact-diff 40
     else:              compact-diff 200
@@ -179,7 +179,7 @@ status:
 
 diff:
     if exit failed:
-        passthrough
+        raw
     elif level ultra:
         compact-diff 30
         or-shell: awk 'NF' | head -50
@@ -437,7 +437,7 @@ Create a lowfat plugin to filter `<COMMAND>` output for LLM contexts.
 
 Before writing code:
 1. Read docs/PLUGINS.md to learn lf-filter, lowfat's plugin DSL: ops
-   (keep/drop/head/tail/or/passthrough, shell:, python:), subcommand
+   (keep/drop/head/tail/or/raw, shell:, python:), subcommand
    selectors, if/elif/else cascades with exit/level/flag guards,
    define macros, split.
 2. Ask me: which subcommands to specialize, and what's noise vs. signal
@@ -454,7 +454,7 @@ Filter contract:
 - level=full  → strip noise (progress chatter, banner prose), keep diffs /
                 errors / structure
 - level=lite  → gentle trim, higher row caps
-- Non-zero $exit → be conservative; `if exit failed: passthrough`
+- Non-zero $exit → be conservative; `if exit failed: raw`
 - Use $sub, fall back to walking $args when you need flags or resource type
 
 Verify:
