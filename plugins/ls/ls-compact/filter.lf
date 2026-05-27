@@ -5,11 +5,29 @@ define strip-noise:
     drop /^total /
     drop /^$/
 
+# Collapse `ls -l` long-form lines to `<type> <size> <name>`.
+# Short-form output (plain `ls`, one filename per line) is preserved.
+define compact-long-form:
+    shell: |
+        awk '
+          NF >= 9 && $1 ~ /^[-dlbcps][-r]/ {
+              t = substr($1,1,1); s = $5;
+              name = $9; for (i=10; i<=NF; i++) name = name " " $i
+              print t, s, name; next
+          }
+          { print }
+        '
+
 *, ultra:
     strip-noise
     shell: awk '{print $NF}'
     head 40
 
+*, lite:
+    strip-noise
+    head 40
+
 *:
     strip-noise
+    compact-long-form
     head 40

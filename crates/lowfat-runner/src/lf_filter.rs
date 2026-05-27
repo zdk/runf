@@ -24,6 +24,19 @@ impl LfFilter {
             entry,
         })
     }
+
+    /// Build from an in-memory `.lf` source — used by embedded plugins where
+    /// the source string lives in `.rodata` and never touches disk. `entry`
+    /// is a synthetic display-only path for error messages.
+    pub fn from_source(info: PluginInfo, source: &str, entry: PathBuf) -> Result<Self> {
+        let ruleset =
+            lf::parse(source).with_context(|| format!("parsing {}", entry.display()))?;
+        Ok(Self {
+            info,
+            ruleset,
+            entry,
+        })
+    }
 }
 
 impl FilterPlugin for LfFilter {

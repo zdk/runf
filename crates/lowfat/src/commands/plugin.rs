@@ -22,7 +22,13 @@ pub struct BenchRow {
 /// `ProcessFilter` directly here would mis-handle `.lf` (sh can't parse the
 /// DSL → empty stdout → 0 tokens, the bug this helper exists to prevent).
 pub fn collect_bench_rows(plugin: &DiscoveredPlugin) -> Result<Vec<BenchRow>> {
-    let samples_dir = plugin.base_dir.join("samples");
+    if plugin.is_embedded() {
+        anyhow::bail!(
+            "plugin '{}' is embedded in the binary and has no on-disk samples to bench against",
+            plugin.manifest.plugin.name
+        );
+    }
+    let samples_dir = plugin.base_dir().join("samples");
     if !samples_dir.is_dir() {
         anyhow::bail!(
             "no samples/ directory in plugin '{}' — add .txt files with sample command output",
@@ -93,12 +99,12 @@ pub fn list() -> Result<()> {
     let plugins = discover_plugins(&config.plugin_dir);
 
     if plugins.is_empty() {
-        println!("No community plugins installed.");
+        println!("No plugins available.");
         println!("  Plugin dir: {}", config.plugin_dir.display());
         return Ok(());
     }
 
-    println!("Community plugins:");
+    println!("Plugins:");
     println!();
     for plugin in &plugins {
         let m = &plugin.manifest;
@@ -106,9 +112,10 @@ pub fn list() -> Result<()> {
         let version = m.plugin.version.as_deref().unwrap_or("?");
         let cmds = m.plugin.commands.join(", ");
         let category = &plugin.category;
+        let tag = if plugin.is_embedded() { " (bundled)" } else { "" };
 
         println!(
-            "  {category}/{name} v{version} — commands: [{cmds}]"
+            "  {category}/{name} v{version}{tag} — commands: [{cmds}]"
         );
     }
 
@@ -135,37 +142,39 @@ pub fn doctor() -> Result<()> {
     for plugin in &plugins {
         total += 1;
         let name = &plugin.manifest.plugin.name;
-        let entry_path = plugin
-            .base_dir
-            .join(plugin.manifest.runtime.resolve_entry(&plugin.base_dir));
-        if !entry_path.exists() {
-            println!("  {name:<24} x entry not found: {}", entry_path.display());
-            continue;
-        }
-
         let requires = &plugin.manifest.runtime.requires;
         if requires.contains_key("uv") {
             needs_uv = true;
         }
 
-        let is_lf = entry_path
-            .extension()
-            .map(|e| e == "lf")
-            .unwrap_or(false);
-        if !is_lf {
-            println!("  {name:<24} ok (shell)");
-            ready += 1;
-            continue;
-        }
-
-        // Parse .lf to verify syntactic validity
-        let source = match std::fs::read_to_string(&entry_path) {
-            Ok(s) => s,
-            Err(e) => {
-                println!("  {name:<24} x cannot read: {e}");
-                continue;
+        // Resolve the .lf source — either from the embedded binary blob or
+        // by reading the entry file from disk.
+        let (source, is_lf) = match &plugin.source {
+            lowfat_plugin::discovery::PluginSource::Embedded { filter_lf } => {
+                (filter_lf.to_string(), true)
+            }
+            lowfat_plugin::discovery::PluginSource::Disk { base_dir } => {
+                let entry_path = base_dir.join(plugin.manifest.runtime.resolve_entry(base_dir));
+                if !entry_path.exists() {
+                    println!("  {name:<24} x entry not found: {}", entry_path.display());
+                    continue;
+                }
+                let is_lf = entry_path.extension().map(|e| e == "lf").unwrap_or(false);
+                if !is_lf {
+                    println!("  {name:<24} ok (shell)");
+                    ready += 1;
+                    continue;
+                }
+                match std::fs::read_to_string(&entry_path) {
+                    Ok(s) => (s, true),
+                    Err(e) => {
+                        println!("  {name:<24} x cannot read: {e}");
+                        continue;
+                    }
+                }
             }
         };
+        let _ = is_lf;
         let rs = match lf::parse(&source) {
             Ok(r) => r,
             Err(e) => {
@@ -322,9 +331,16 @@ pub fn info(name: &str) -> Result<()> {
             println!("  Description: {}", m.plugin.description.as_deref().unwrap_or("-"));
             println!("  Author:      {}", m.plugin.author.as_deref().unwrap_or("-"));
             println!("  Category:    {}", p.category);
-            println!("  Entry:       {}", m.runtime.resolve_entry(&p.base_dir));
+            let base_dir = p.base_dir();
+            let entry = match &p.source {
+                lowfat_plugin::discovery::PluginSource::Embedded { .. } => "filter.lf (embedded)".to_string(),
+                lowfat_plugin::discovery::PluginSource::Disk { base_dir } => {
+                    m.runtime.resolve_entry(base_dir)
+                }
+            };
+            println!("  Entry:       {entry}");
             println!("  Commands:    {}", m.plugin.commands.join(", "));
-            println!("  Path:        {}", p.base_dir.display());
+            println!("  Path:        {}", base_dir.display());
         }
         None => {
             eprintln!("lowfat: plugin not found: {name}");

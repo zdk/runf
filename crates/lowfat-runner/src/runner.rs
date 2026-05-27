@@ -1,6 +1,6 @@
 use anyhow::Result;
 use lowfat_core::pipeline::{apply_builtin, proc_normalize, Pipeline, StageType};
-use lowfat_plugin::discovery::DiscoveredPlugin;
+use lowfat_plugin::discovery::{DiscoveredPlugin, PluginSource};
 use lowfat_plugin::plugin::{FilterInput, FilterPlugin, PluginInfo};
 use lowfat_plugin::security;
 use std::collections::HashMap;
@@ -8,23 +8,19 @@ use std::collections::HashMap;
 use crate::lf_filter::LfFilter;
 use crate::process::ProcessFilter;
 
-/// Loads a discovered plugin into a runnable [`FilterPlugin`]. Dispatches
-/// on the entry's file extension: `.lf` → in-process [`LfFilter`], any
-/// other extension → external [`ProcessFilter`] via `sh`.
+/// Loads a discovered plugin into a runnable [`FilterPlugin`]. Dispatches by
+/// source first, then by entry extension:
+/// - [`PluginSource::Embedded`] → always [`LfFilter`] from the in-memory string
+/// - [`PluginSource::Disk`] with `.lf` entry → [`LfFilter`] reading from disk
+/// - [`PluginSource::Disk`] with any other extension → [`ProcessFilter`] via `sh`
 ///
-/// The entrypoint is resolved by `RuntimeConfig::resolve_entry`: an explicit
-/// `runtime.entry` in the manifest wins; otherwise it is auto-detected —
-/// `filter.lf` when present, else `filter.sh`. A plain `.lf` plugin therefore
-/// needs no `[runtime]` table at all.
+/// The entrypoint for disk plugins is resolved by `RuntimeConfig::resolve_entry`:
+/// an explicit `runtime.entry` in the manifest wins; otherwise auto-detected.
 pub struct HybridRunner;
 
 impl HybridRunner {
     pub fn load(plugin: &DiscoveredPlugin) -> Result<Box<dyn FilterPlugin>> {
         let manifest = &plugin.manifest;
-        let entry_path = plugin
-            .base_dir
-            .join(manifest.runtime.resolve_entry(&plugin.base_dir));
-
         let info = PluginInfo {
             name: manifest.plugin.name.clone(),
             version: manifest
@@ -40,25 +36,35 @@ impl HybridRunner {
                 .unwrap_or_default(),
         };
 
-        // Security validation
-        if let Err(e) = security::validate_plugin(manifest, &plugin.base_dir) {
-            anyhow::bail!("security check failed for '{}': {e}", manifest.plugin.name);
-        }
+        match &plugin.source {
+            PluginSource::Embedded { filter_lf } => {
+                let entry = plugin.base_dir().join("filter.lf");
+                let filter = LfFilter::from_source(info, filter_lf, entry)?;
+                Ok(Box::new(filter))
+            }
+            PluginSource::Disk { base_dir } => {
+                let entry_path = base_dir.join(manifest.runtime.resolve_entry(base_dir));
 
-        let is_lf = entry_path
-            .extension()
-            .map(|e| e == "lf")
-            .unwrap_or(false);
-        if is_lf {
-            let filter = LfFilter::load(info, entry_path)?;
-            Ok(Box::new(filter))
-        } else {
-            let filter = ProcessFilter {
-                info,
-                entry: entry_path,
-                base_dir: plugin.base_dir.clone(),
-            };
-            Ok(Box::new(filter))
+                if let Err(e) = security::validate_plugin(manifest, base_dir) {
+                    anyhow::bail!("security check failed for '{}': {e}", manifest.plugin.name);
+                }
+
+                let is_lf = entry_path
+                    .extension()
+                    .map(|e| e == "lf")
+                    .unwrap_or(false);
+                if is_lf {
+                    let filter = LfFilter::load(info, entry_path)?;
+                    Ok(Box::new(filter))
+                } else {
+                    let filter = ProcessFilter {
+                        info,
+                        entry: entry_path,
+                        base_dir: base_dir.clone(),
+                    };
+                    Ok(Box::new(filter))
+                }
+            }
         }
     }
 }

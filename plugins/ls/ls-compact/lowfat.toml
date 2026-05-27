@@ -1,6 +1,5 @@
 [plugin]
 name = "ls-compact"
+version = "0.5.5"
+description = "Compact ls output for LLM contexts"
 commands = ["ls"]
-
-[runtime]
-entry = "filter.lf"

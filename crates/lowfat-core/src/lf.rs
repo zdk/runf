@@ -1991,10 +1991,10 @@ foo:
             "../../../plugins/git/git-compact/filter.lf"
         );
         let rs = parse_ok(src);
-        // Defines: strip-trailers, abbrev-hash, compact-diff
-        assert_eq!(rs.defines.len(), 3);
+        // Defines: strip-trailers, abbrev-hash, compact-diff, drop-index-meta
+        assert_eq!(rs.defines.len(), 4);
         let names: Vec<&str> = rs.defines.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, ["strip-trailers", "abbrev-hash", "compact-diff"]);
+        assert_eq!(names, ["strip-trailers", "abbrev-hash", "compact-diff", "drop-index-meta"]);
         assert_eq!(rs.defines[2].params, vec!["limit".to_string()]);
 
         // Selection sanity

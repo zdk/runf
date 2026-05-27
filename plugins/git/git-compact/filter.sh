@@ -59,8 +59,14 @@ abbreviate_commit_hash() {
 case "$SUB" in
   status)
     # File entries: long-format indents with a tab; short/porcelain (-s)
-    # prefixes two status-code columns.
-    result=$(echo "$RAW" | grep -E '^(	|[ MADRCU?!]{2} )' | head -n 30)
+    # prefixes two status-code columns. Full/lite also keep section headers
+    # ("On branch", "Changes …", "Untracked", "## branch") for staged-vs-
+    # unstaged context; ultra strips to file entries only.
+    case "$LEVEL" in
+      ultra) result=$(echo "$RAW" | grep -E '^(	|[ MADRCU?!]{2} )' | head -n 15) ;;
+      lite)  result=$(echo "$RAW" | grep -E '^(	|[ MADRCU?!]{2} |## |On branch|Changes|Untracked)' | head -n 60) ;;
+      *)     result=$(echo "$RAW" | grep -E '^(	|[ MADRCU?!]{2} |## |On branch|Changes|Untracked)' | head -n 30) ;;
+    esac
     if [ -z "$result" ]; then
       echo "git status: clean"
     else
@@ -88,6 +94,9 @@ case "$SUB" in
       ultra)
         echo "$RAW" | grep -E '^(commit |    )' | strip_trailers | abbreviate_commit_hash | head -n 10
         ;;
+      lite)
+        echo "$RAW" | strip_trailers | abbreviate_commit_hash | head -n 50
+        ;;
       *)
         echo "$RAW" | strip_trailers | abbreviate_commit_hash | head -n 25
         ;;
@@ -103,6 +112,15 @@ case "$SUB" in
           | strip_trailers \
           | abbreviate_commit_hash \
           | head -n 20
+        ;;
+      lite)
+        # Permissive: drop only commit-message trailers and pre-hunk index/mode
+        # meta (--- a/X / +++ b/X always duplicate the diff --git path).
+        echo "$RAW" \
+          | strip_trailers \
+          | abbreviate_commit_hash \
+          | grep -vE '^(index [0-9a-f]+\.\.[0-9a-f]+( [0-7]+)?|new file mode |deleted file mode |old mode |new mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |---|\+\+\+) ' \
+          | head -n 200
         ;;
       *)
         # Full/lite: split into pre-diff (commit metadata) and post-diff (hunks).

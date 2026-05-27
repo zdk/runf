@@ -67,14 +67,21 @@ pub fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    /// Simulate hook processing by extracting the rewrite logic.
+    /// Simulate hook processing by extracting the rewrite logic. The hook
+    /// rewrites a command iff a plugin (disk or embedded) claims it.
     fn rewrite_command(command: &str) -> Option<String> {
         let base_cmd = command.split_whitespace().next()?;
         if base_cmd == "lowfat" || base_cmd == "lf" {
             return None;
         }
-        let builtins = crate::filters::builtins();
-        if builtins.contains_key(base_cmd) {
+        // Discover from a deliberately-empty disk dir so we exercise only the
+        // embedded plugins (git/docker/ls). Real callers use the resolved
+        // plugin_dir.
+        let plugins = lowfat_plugin::discovery::discover_plugins(
+            std::path::Path::new("/nonexistent-dir-for-test"),
+        );
+        let map = lowfat_plugin::discovery::resolve_plugins(&plugins);
+        if map.contains_key(base_cmd) {
             Some(format!("lowfat {command}"))
         } else {
             None

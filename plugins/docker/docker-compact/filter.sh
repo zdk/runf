@@ -17,7 +17,10 @@ case "$SUB" in
       ultra)
         # Name + status only
         echo "NAME STATUS"
-        echo "$RAW" | tail -n +2 | awk '{print $NF, $(NF-2)}' | head -n 40
+        echo "$RAW" | tail -n +2 | awk '{print $NF, $(NF-2)}' | head -n 20
+        ;;
+      lite)
+        echo "$RAW" | collapse | head -n 80
         ;;
       *)
         echo "$RAW" | collapse | head -n 40
@@ -30,7 +33,10 @@ case "$SUB" in
       ultra)
         # Repo + tag + size
         echo "REPO TAG SIZE"
-        echo "$RAW" | tail -n +2 | awk '{print $1, $2, $(NF-1)}' | head -n 40
+        echo "$RAW" | tail -n +2 | awk '{print $1, $2, $(NF-1)}' | head -n 20
+        ;;
+      lite)
+        echo "$RAW" | collapse | head -n 80
         ;;
       *)
         echo "$RAW" | collapse | head -n 40

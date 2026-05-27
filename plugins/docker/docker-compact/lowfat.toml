@@ -1,7 +1,6 @@
 [plugin]
 name = "docker-compact"
+version = "0.5.5"
+description = "Compact docker ps/images/logs/build/pull/compose output for LLM contexts"
 commands = ["docker"]
 subcommands = ["ps", "images", "logs", "build", "pull", "compose"]
-
-[runtime]
-entry = "filter.lf"

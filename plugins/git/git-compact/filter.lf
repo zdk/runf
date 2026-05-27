@@ -27,12 +27,25 @@ define compact-diff(limit):
         '
 
 # ── status ────────────────────────────────────────────────────────
-# File entries in both shapes: long-format (default) indents them with a
-# tab; short/porcelain (`-s`) prefixes two status-code columns.
+# File entries: long-format indents them with a tab; short/porcelain (`-s`)
+# prefixes two status-code columns. At full/lite we also keep the section
+# headers ("On branch", "Changes …", "Untracked …", "## branch" for porcelain)
+# since they carry staged-vs-unstaged context; ultra strips them down to
+# file entries only.
 status:
-    keep /^(\t|[ MADRCU?!]{2} )/
-    head 30
-    or "git status: clean"
+    match level:
+        ultra:
+            keep /^(\t|[ MADRCU?!]{2} )/
+            head 15
+            or "git status: clean"
+        lite:
+            keep /^(\t|[ MADRCU?!]{2} |## |On branch|Changes|Untracked)/
+            head 60
+            or "git status: clean"
+        else:
+            keep /^(\t|[ MADRCU?!]{2} |## |On branch|Changes|Untracked)/
+            head 30
+            or "git status: clean"
 
 # ── diff ──────────────────────────────────────────────────────────
 diff:
@@ -50,33 +63,50 @@ diff:
 
 # ── log ───────────────────────────────────────────────────────────
 log:
-    if level ultra:
-        keep /^(commit |    )/
-        strip-trailers
-        abbrev-hash
-        head 10
-    else:
-        strip-trailers
-        abbrev-hash
-        head 25
-
-# ── show ──────────────────────────────────────────────────────────
-show:
-    if level ultra:
-        keep /^(commit |Author:|Date:|    |diff --git)/
-        strip-trailers
-        abbrev-hash
-        head 20
-    else:
-        # split at first `diff `, run separate chains on each half
-        split /^diff /
-        pre:
-            keep /^(commit |Merge:|Author:|Date:|    )/
+    match level:
+        ultra:
+            keep /^(commit |    )/
             strip-trailers
             abbrev-hash
-        post:
-            compact-diff 100
-        head 100
+            head 10
+        lite:
+            strip-trailers
+            abbrev-hash
+            head 50
+        else:
+            strip-trailers
+            abbrev-hash
+            head 25
+
+# ── show ──────────────────────────────────────────────────────────
+# Lite is permissive — preserve full context (incl. unchanged lines); only
+# strip trailers + abbreviate the hash, and drop pre-hunk index/mode meta
+# which always duplicates the path already on `diff --git`.
+define drop-index-meta:
+    drop /^(index [0-9a-f]+\.\.[0-9a-f]+( [0-7]+)?|new file mode |deleted file mode |old mode |new mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |---|\+\+\+) /
+
+show:
+    match level:
+        ultra:
+            keep /^(commit |Author:|Date:|    |diff --git)/
+            strip-trailers
+            abbrev-hash
+            head 20
+        lite:
+            strip-trailers
+            abbrev-hash
+            drop-index-meta
+            head 200
+        else:
+            # split at first `diff `, run separate chains on each half
+            split /^diff /
+            pre:
+                keep /^(commit |Merge:|Author:|Date:|    )/
+                strip-trailers
+                abbrev-hash
+            post:
+                compact-diff 100
+            head 100
 
 # ── default ───────────────────────────────────────────────────────
 *:
