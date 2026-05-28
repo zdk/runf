@@ -123,9 +123,15 @@ fn check_plugin(plugin_dir: &Path, tolerance_pct: f64) {
     }
 }
 
-// Bundled plugins live in the lowfat-plugin crate; community ones in plugins/.
+// Shipped plugins are embedded in the lowfat-plugin crate. The tool-specific
+// fixtures below (cargo/go/npm/kubectl) are bench/parity test data only — not
+// shipped; installable versions live in the community repo.
 fn bundled_dir() -> PathBuf {
     repo_root().join("crates/lowfat-plugin/embedded")
+}
+
+fn fixtures_dir() -> PathBuf {
+    repo_root().join("test-fixtures/plugins")
 }
 
 #[test]
@@ -165,7 +171,7 @@ fn git_diff_stat_fallback() {
 
 #[test]
 fn cargo_compact_parity() {
-    check_plugin(&repo_root().join("plugins/cargo/cargo-compact"), 10.0);
+    check_plugin(&fixtures_dir().join("cargo/cargo-compact"), 10.0);
 }
 
 #[test]
@@ -180,10 +186,10 @@ fn ls_compact_parity() {
 
 #[test]
 fn npm_compact_parity() {
-    check_plugin(&repo_root().join("plugins/npm/npm-compact"), 10.0);
+    check_plugin(&fixtures_dir().join("npm/npm-compact"), 10.0);
 }
 
 #[test]
 fn go_compact_parity() {
-    check_plugin(&repo_root().join("plugins/go/go-compact"), 10.0);
+    check_plugin(&fixtures_dir().join("go/go-compact"), 10.0);
 }

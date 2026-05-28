@@ -2290,7 +2290,7 @@ foo:
     #[test]
     fn kubectl_compact_plugin_parses() {
         let src = include_str!(
-            "../../../plugins/kubectl/kubectl-compact/filter.lf"
+            "../../../test-fixtures/plugins/kubectl/kubectl-compact/filter.lf"
         );
         let rs = parse_ok(src);
         // Define: clean-yaml (with PEP 723 body)
