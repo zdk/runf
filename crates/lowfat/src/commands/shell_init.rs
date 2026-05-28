@@ -21,7 +21,7 @@ fn print_posix_init() {
     print!(r#"# lowfat shell init — auto-wrap commands for LLM token savings
 # Usage: eval "$(lowfat shell-init zsh)"
 
-if [[ "$CLAUDECODE" == "1" ]] || [[ -n "$CODEX_ENV" ]] || [[ "$LOWFAT_AUTO" == "1" ]]; then
+if [[ "$CLAUDECODE" == "1" ]] || [[ -n "$CODEX_ENV" ]] || [[ "$LOWFAT_ENABLE" == "1" ]]; then
   for _lf_cmd in $(command lowfat filters --commands 2>/dev/null); do
     eval "$_lf_cmd() {{ command lowfat $_lf_cmd \"\$@\"; }}"
   done
@@ -34,7 +34,7 @@ fn print_fish_init() {
     print!(r#"# lowfat shell init for fish
 # Usage: lowfat shell-init fish | source
 
-if test "$CLAUDECODE" = 1; or test -n "$CODEX_ENV"; or test "$LOWFAT_AUTO" = 1
+if test "$CLAUDECODE" = 1; or test -n "$CODEX_ENV"; or test "$LOWFAT_ENABLE" = 1
   for cmd in (command lowfat filters --commands 2>/dev/null)
     eval "function $cmd; command lowfat $cmd \$argv; end"
   end

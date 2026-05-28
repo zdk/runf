@@ -54,7 +54,7 @@ Pick one of:
 }
 ```
 
-**Shell integration** — auto-activates inside agent environments (`CLAUDECODE=1`, `CODEX_ENV`):
+**Shell integration** — auto-activates inside agent environments (`CLAUDECODE=1`, `CODEX_ENV`), or set `LOWFAT_ENABLE=1` to force it on any shell:
 
 ```sh
 echo 'eval "$(lowfat shell-init zsh)"' >> ~/.zshrc   # or ~/.bashrc
