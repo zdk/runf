@@ -165,7 +165,38 @@ fn resolve_filter(
 }
 
 /// Resolve which pipeline to use for a command.
+///
+/// Resolves the per-command base pipeline, then prepends the wildcard
+/// (`pipeline.* = ...`) stages if configured — so always-on processors
+/// like `redact-secrets` fire on every command without overriding any
+/// per-command pipeline the user set.
 fn resolve_pipeline(
+    cmd: &str,
+    exit_code: i32,
+    raw: &str,
+    config: &RunfConfig,
+    filter_name: &Option<String>,
+    plugins: &[DiscoveredPlugin],
+    cmd_map: &HashMap<String, usize>,
+) -> Pipeline {
+    let mut base = resolve_base_pipeline(cmd, exit_code, raw, config, filter_name, plugins, cmd_map);
+
+    // Prepend `pipeline.* = ...` stages. The `cmd != "*"` guard is paranoia
+    // for someone literally running a command named `*`.
+    if cmd != "*" {
+        if let Some(wild) = config.pipeline_wildcard() {
+            if let Some(prep) = wild.select(exit_code, raw) {
+                let mut stages = prep.stages.clone();
+                stages.append(&mut base.stages);
+                base.stages = stages;
+            }
+        }
+    }
+    base
+}
+
+/// Resolve the per-command base pipeline (without the wildcard layer).
+fn resolve_base_pipeline(
     cmd: &str,
     exit_code: i32,
     raw: &str,
@@ -354,5 +385,65 @@ mod tests {
         assert_eq!(history_subcommand("status", &known), "status");
         // `checkout` is a valid identifier but not in the known list → dropped.
         assert_eq!(history_subcommand("checkout", &known), "");
+    }
+
+    /// Build a `RunfConfig` containing the given pipeline.<cmd> lines.
+    fn config_with_pipelines(lines: &[(&str, &str)]) -> RunfConfig {
+        use lowfat_core::pipeline::parse_conditional_pipeline;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        let mut pipelines = HashMap::new();
+        // Group raw lines into (cmd → [(condition, spec)]) — mirrors the
+        // bucketing the .lowfat parser does in config.rs:88-91.
+        let mut by_cmd: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (key, spec) in lines {
+            let (cmd, cond) = match key.split_once('.') {
+                Some((c, cond)) => (c.to_string(), cond.to_string()),
+                None => (key.to_string(), String::new()),
+            };
+            by_cmd.entry(cmd).or_default().push((cond, spec.to_string()));
+        }
+        for (cmd, ls) in by_cmd {
+            pipelines.insert(cmd, parse_conditional_pipeline(&ls));
+        }
+        RunfConfig {
+            level: lowfat_core::level::Level::Full,
+            disabled: HashSet::new(),
+            allowed: None,
+            data_dir: PathBuf::new(),
+            plugin_dir: PathBuf::new(),
+            home_dir: PathBuf::new(),
+            pipelines,
+        }
+    }
+
+    #[test]
+    fn wildcard_prepends_to_per_command_pipeline() {
+        // `pipeline.* = redact-secrets`
+        // `pipeline.echo = truncate | strip-ansi | token-budget`
+        let config = config_with_pipelines(&[
+            ("*", "redact-secrets"),
+            ("echo", "truncate | strip-ansi | token-budget"),
+        ]);
+        let p = resolve_pipeline("echo", 0, "", &config, &None, &[], &HashMap::new());
+        assert_eq!(
+            p.display(),
+            "redact-secrets → truncate → strip-ansi → token-budget"
+        );
+    }
+
+    #[test]
+    fn wildcard_prepends_even_without_per_command_pipeline() {
+        // `pipeline.* = redact-secrets`, nothing for `echo` → base is passthrough.
+        let config = config_with_pipelines(&[("*", "redact-secrets")]);
+        let p = resolve_pipeline("echo", 0, "", &config, &None, &[], &HashMap::new());
+        assert_eq!(p.display(), "redact-secrets → passthrough");
+    }
+
+    #[test]
+    fn no_wildcard_leaves_per_command_pipeline_intact() {
+        let config = config_with_pipelines(&[("echo", "truncate | strip-ansi")]);
+        let p = resolve_pipeline("echo", 0, "", &config, &None, &[], &HashMap::new());
+        assert_eq!(p.display(), "truncate → strip-ansi");
     }
 }

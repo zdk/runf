@@ -39,9 +39,12 @@ pub fn run() -> Result<()> {
     let builtins = crate::filters::builtins();
     let plugins = lowfat_plugin::discovery::discover_plugins(&config.plugin_dir);
     let plugin_map = lowfat_plugin::discovery::resolve_plugins(&plugins);
+    // A wildcard pipeline (e.g. `pipeline.* = redact-secrets`) means *every*
+    // bash command needs to route through lowfat so the prepended stages fire.
     let has_filter = builtins.contains_key(base_cmd)
         || plugin_map.contains_key(base_cmd)
-        || config.pipeline_for(base_cmd).is_some();
+        || config.pipeline_for(base_cmd).is_some()
+        || config.pipeline_wildcard().is_some();
 
     if !has_filter {
         return Ok(());

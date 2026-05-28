@@ -17,6 +17,11 @@ pub struct RunfConfig {
     pub home_dir: PathBuf,
     /// Per-command conditional pipelines from .lowfat config.
     /// Supports: pipeline.git = ..., pipeline.git.error = ..., pipeline.git.large = ...
+    /// The special key `pipeline.* = ...` is a global wildcard whose stages
+    /// are *prepended* to every resolved pipeline — useful for always-on
+    /// processors like `redact-secrets`. See [`pipeline_wildcard`].
+    ///
+    /// [`pipeline_wildcard`]: RunfConfig::pipeline_wildcard
     pub pipelines: HashMap<String, ConditionalPipelines>,
 }
 
@@ -77,6 +82,7 @@ impl RunfConfig {
                         // pipeline.git = strip-ansi | git-compact | truncate
                         // pipeline.git.error = strip-ansi | head
                         // pipeline.git.large = git-compact | token-budget
+                        // pipeline.* = redact-secrets       (wildcard, prepended)
                         if let Some((key, spec)) = rest.split_once('=') {
                             let key = key.trim();
                             let spec = spec.trim().to_string();
@@ -134,6 +140,14 @@ impl RunfConfig {
     /// Get the conditional pipelines for a command, if configured.
     pub fn pipeline_for(&self, cmd: &str) -> Option<&ConditionalPipelines> {
         self.pipelines.get(cmd)
+    }
+
+    /// Get the wildcard pipeline (`pipeline.* = ...`), if configured.
+    /// Callers prepend its stages to whatever pipeline they resolve, so a
+    /// rule like `pipeline.* = redact-secrets` applies to every command
+    /// without disabling per-command pipelines.
+    pub fn pipeline_wildcard(&self) -> Option<&ConditionalPipelines> {
+        self.pipelines.get("*")
     }
 
     /// Check if a filter name is enabled under current config.
@@ -316,6 +330,41 @@ mod tests {
         let home = PathBuf::from("/home/user");
         let r = resolve_home_dir(None, None, &home, &|_| true);
         assert_eq!(r, home.join(".config/lowfat"));
+    }
+
+    #[test]
+    fn pipeline_wildcard_resolves() {
+        let mut pipelines = HashMap::new();
+        pipelines.insert(
+            "*".to_string(),
+            parse_conditional_pipeline(&[("".into(), "redact-secrets".into())]),
+        );
+        let config = RunfConfig {
+            level: Level::Full,
+            disabled: HashSet::new(),
+            allowed: None,
+            data_dir: PathBuf::new(),
+            plugin_dir: PathBuf::new(),
+            home_dir: PathBuf::new(),
+            pipelines,
+        };
+        assert!(config.pipeline_wildcard().is_some());
+        // pipeline_for is unchanged: exact-match only, no fallback.
+        assert!(config.pipeline_for("anything").is_none());
+    }
+
+    #[test]
+    fn pipeline_wildcard_absent_by_default() {
+        let config = RunfConfig {
+            level: Level::Full,
+            disabled: HashSet::new(),
+            allowed: None,
+            data_dir: PathBuf::new(),
+            plugin_dir: PathBuf::new(),
+            home_dir: PathBuf::new(),
+            pipelines: HashMap::new(),
+        };
+        assert!(config.pipeline_wildcard().is_none());
     }
 
     #[test]
