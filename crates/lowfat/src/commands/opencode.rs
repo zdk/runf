@@ -4,7 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 
 // Plugin source baked into the binary so install needs no network or repo.
-const PLUGIN_TS: &str = include_str!("../../../../hooks/opencode/lowfat.ts");
+// Must live inside the crate (not the workspace root) so `cargo publish` ships
+// it — see crates/lowfat-plugin/src/embedded.rs for the same constraint.
+const PLUGIN_TS: &str = include_str!("../../embedded/opencode/lowfat.ts");
 
 /// Resolve `~/.config/opencode/plugins/lowfat.ts`, honoring `$XDG_CONFIG_HOME`.
 fn plugin_path() -> Result<PathBuf> {
