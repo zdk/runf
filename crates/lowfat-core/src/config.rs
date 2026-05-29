@@ -35,7 +35,7 @@ impl RunfConfig {
             lowfat_home.as_deref(),
             xdg_config_home.as_deref(),
             &home,
-            &|p| p.exists(),
+            &|p| p.is_dir(),
         );
 
         let data_dir = env::var("LOWFAT_DATA")
@@ -190,14 +190,17 @@ fn dirs_home() -> PathBuf {
 ///   3. `~/.config/lowfat` if that directory already exists (XDG default)
 ///   4. `~/.lowfat` — fallback when none of the above apply
 ///
-/// When both an XDG path and `~/.lowfat` exist, prints a one-shot warning
-/// to stderr and prefers XDG. Pure function — takes env vars + a
-/// `path_exists` closure so tests don't touch the real fs.
+/// Home-directory candidates must be directories: a file at
+/// `~/.lowfat` is the pipeline config (see [`find_config`]), not a
+/// competing home, and is not treated as one here. When both an XDG
+/// directory and a legacy `~/.lowfat/` directory exist, prints a
+/// one-shot warning to stderr and prefers XDG. Pure function — takes
+/// env vars + a `path_is_dir` closure so tests don't touch the real fs.
 pub fn resolve_home_dir(
     lowfat_home: Option<&str>,
     xdg_config_home: Option<&str>,
     home: &std::path::Path,
-    path_exists: &dyn Fn(&std::path::Path) -> bool,
+    path_is_dir: &dyn Fn(&std::path::Path) -> bool,
 ) -> PathBuf {
     if let Some(h) = lowfat_home {
         return PathBuf::from(h);
@@ -207,25 +210,25 @@ pub fn resolve_home_dir(
 
     if let Some(xdg) = xdg_config_home {
         let xdg_path = PathBuf::from(xdg).join("lowfat");
-        warn_if_both_exist(&xdg_path, &dot_lowfat, path_exists);
+        warn_if_both_dirs_exist(&xdg_path, &dot_lowfat, path_is_dir);
         return xdg_path;
     }
 
     let xdg_default = home.join(".config").join("lowfat");
-    if path_exists(&xdg_default) {
-        warn_if_both_exist(&xdg_default, &dot_lowfat, path_exists);
+    if path_is_dir(&xdg_default) {
+        warn_if_both_dirs_exist(&xdg_default, &dot_lowfat, path_is_dir);
         return xdg_default;
     }
 
     dot_lowfat
 }
 
-fn warn_if_both_exist(
+fn warn_if_both_dirs_exist(
     chosen: &std::path::Path,
     other: &std::path::Path,
-    path_exists: &dyn Fn(&std::path::Path) -> bool,
+    path_is_dir: &dyn Fn(&std::path::Path) -> bool,
 ) {
-    if chosen != other && path_exists(chosen) && path_exists(other) {
+    if chosen != other && path_is_dir(chosen) && path_is_dir(other) {
         eprintln!(
             "[lowfat] warning: both {} and {} exist; using {}. Remove one to silence this.",
             chosen.display(),
@@ -330,6 +333,24 @@ mod tests {
         let home = PathBuf::from("/home/user");
         let r = resolve_home_dir(None, None, &home, &|_| true);
         assert_eq!(r, home.join(".config/lowfat"));
+    }
+
+    // Regression: `~/.lowfat` as a *file* is the pipeline config, not a
+    // competing home directory. Resolution must pick XDG without warning,
+    // and must not treat the file as a usable home.
+    #[test]
+    fn home_xdg_used_when_dot_lowfat_is_file_only() {
+        let home = PathBuf::from("/home/user");
+        let xdg_dir = home.join(".config/lowfat");
+        // path_is_dir reports only the XDG path as a directory; ~/.lowfat
+        // exists on the real fs as a file but is_dir returns false.
+        let r = resolve_home_dir(
+            None,
+            Some("/home/user/.config"),
+            &home,
+            &|p| p == xdg_dir.as_path(),
+        );
+        assert_eq!(r, xdg_dir);
     }
 
     #[test]
