@@ -20,13 +20,16 @@ lowfat is a lightweight CLI tool that reduces AI token costs by filtering unnece
 
 ### Token savings on real commands
 
-| Command        | Raw    | Filtered | Saved   |
-| -------------- | ------ | -------- | ------- |
-| `git status`   | 115t   | 5t       | **96%** |
-| `git diff`     | 2,376t | 115t     | **95%** |
-| `git log`      | 379t   | 118t     | **69%** |
-| `docker ps`    | 271t   | 41t      | **85%** |
-| `ls -la`       | 192t   | 30t      | **84%** |
+Aggregated from real local usage (`lowfat stats`): **1,626 commands, 92.8% saved overall**. Ranked by most saved.
+
+| Command          | Raw     | Filtered | Saved   |
+| ---------------- | ------- | -------- | ------- |
+| `grep`           | 1.4Mt   | 29.5Kt   | **98%** |
+| `docker`         | 693.6Kt | 27.2Kt   | **96%** |
+| `kubectl get`    | 1.4Mt   | 60.3Kt   | **96%** |
+| `find`           | 196.1Kt | 13.3Kt   | **93%** |
+| `docker compose` | 21.5Kt  | 2.3Kt    | **89%** |
+| `git log`        | 37.6Kt  | 9Kt      | **76%** |
 
 ### Install
 
@@ -48,7 +51,10 @@ Pick one of:
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "lowfat hook" }] }
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "lowfat hook" }]
+      }
     ]
   }
 }
@@ -77,7 +83,7 @@ lowfat docker ps
 lowfat ls -la
 ```
 
-**pi agent** — in `~/.pi/agent/settings.json`:
+**Pi agent** — in `~/.pi/agent/settings.json`:
 
 ```json
 { "shellCommandPrefix": "eval \"$(lowfat shell-init zsh)\"; " }
