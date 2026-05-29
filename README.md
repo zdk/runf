@@ -60,6 +60,15 @@ Pick one of:
 echo 'eval "$(lowfat shell-init zsh)"' >> ~/.zshrc   # or ~/.bashrc
 ```
 
+**OpenCode plugin** — one command, no config editing:
+
+```sh
+lowfat opencode install   # writes ~/.config/opencode/plugins/lowfat.ts
+```
+
+Restart OpenCode; commands are rewritten transparently before they run.
+Remove it anytime with `lowfat opencode uninstall`.
+
 **Direct usage** — prefix any command:
 
 ```sh

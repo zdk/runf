@@ -62,6 +62,21 @@ Examples:
     // ── integrations ──────────────────────────────────────────────
     /// Claude Code PreToolUse hook (reads JSON from stdin)
     Hook,
+    /// Rewrite a command to its lowfat-wrapped form (used by agent plugins)
+    #[command(after_help = "\
+Examples:
+  lowfat rewrite git status        # → lowfat git status
+  lowfat rewrite curl example.com  # → curl example.com (no filter, unchanged)")]
+    Rewrite {
+        /// Command to rewrite (e.g., git status)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Manage the OpenCode plugin integration
+    Opencode {
+        #[command(subcommand)]
+        action: OpencodeAction,
+    },
     /// Print shell init script for eval
     ShellInit {
         /// Shell type (bash, zsh, fish)
@@ -197,6 +212,14 @@ Examples:
     },
 }
 
+#[derive(Subcommand)]
+enum OpencodeAction {
+    /// Install the plugin to ~/.config/opencode/plugins/lowfat.ts
+    Install,
+    /// Remove the installed OpenCode plugin
+    Uninstall,
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -230,6 +253,11 @@ fn main() {
         },
         Some(Commands::Level { value }) => commands::level::run(value.as_deref()),
         Some(Commands::Hook) => commands::hook::run(),
+        Some(Commands::Rewrite { command }) => commands::rewrite::run(&command),
+        Some(Commands::Opencode { action }) => match action {
+            OpencodeAction::Install => commands::opencode::install(),
+            OpencodeAction::Uninstall => commands::opencode::uninstall(),
+        },
         Some(Commands::ShellInit { shell }) => commands::shell_init::run(&shell),
         Some(Commands::Filter {
             path,

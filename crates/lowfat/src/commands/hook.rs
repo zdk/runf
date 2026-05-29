@@ -21,37 +21,12 @@ pub fn run() -> Result<()> {
         None => return Ok(()),
     };
 
-    // Extract the base command (first word)
-    let base_cmd = command.split_whitespace().next().unwrap_or("");
-
-    // Skip if already wrapped or is a lowfat command itself
-    if base_cmd == "lowfat" || base_cmd == "lf" {
-        return Ok(());
-    }
-
-    // Check if this command has a filter available
-    let config = lowfat_core::config::RunfConfig::resolve();
-    if !config.is_enabled(base_cmd) {
-        return Ok(());
-    }
-
-    // Check if we have a filter for this command (native or plugin)
-    let builtins = crate::filters::builtins();
-    let plugins = lowfat_plugin::discovery::discover_plugins(&config.plugin_dir);
-    let plugin_map = lowfat_plugin::discovery::resolve_plugins(&plugins);
-    // A wildcard pipeline (e.g. `pipeline.* = redact-secrets`) means *every*
-    // bash command needs to route through lowfat so the prepended stages fire.
-    let has_filter = builtins.contains_key(base_cmd)
-        || plugin_map.contains_key(base_cmd)
-        || config.pipeline_for(base_cmd).is_some()
-        || config.pipeline_wildcard().is_some();
-
-    if !has_filter {
-        return Ok(());
-    }
-
-    // Rewrite: "git status" → "lowfat git status"
-    let rewritten = format!("lowfat {command}");
+    // Reuse the canonical rewrite logic (shared with `lowfat rewrite` and the
+    // OpenCode plugin). `None` means no filter applies — pass through.
+    let rewritten = match crate::commands::rewrite::rewrite_command(command) {
+        Some(r) => r,
+        None => return Ok(()),
+    };
 
     let output = json!({
         "hookSpecificOutput": {
